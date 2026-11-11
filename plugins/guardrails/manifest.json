@@ -1,0 +1,15 @@
+{
+  "manifest": "guardrails",
+  "version": "1.0.0",
+  "compat": "^0.1.0",
+  "capabilities": {
+    "hooks": ["pre-tool", "post-tool", "on-event", "verify-gate"],
+    "tools": ["stats-summary"],
+    "config": {
+      "allowed_roots": { "type": "string" },
+      "max_note_chars": { "type": "number" }
+    }
+  },
+  "description": "first-party guardrails: root-gated write/edit/bash, tool stats, event counts, and a verify-gate implementation",
+  "licence": "MIT"
+}

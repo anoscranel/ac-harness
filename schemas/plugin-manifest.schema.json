@@ -1,0 +1,27 @@
+{
+  "$schema": "http://json-schema.org/draft/2020-12/schema",
+  "$id": "https://example.invalid/schemas/plugin-manifest.schema.json",
+  "title": "agent-harness plugin manifest",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["manifest", "version", "compat", "capabilities", "description", "licence"],
+  "properties": {
+    "manifest":     { "type": "string", "minLength": 1, "pattern": "^[a-z0-9][a-z0-9-]*$" },
+    "version":      { "type": "string", "pattern": "^(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)(?:-[0-9A-Za-z\\-.]+)?(?:\\+[0-9A-Za-z\\-.]+)?$" },
+    "compat":       { "type": "string", "pattern": "^(\\^|>=)?(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)$" },
+    "capabilities": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "tools":     { "type": "array", "items": { "type": "string", "minLength": 1 } },
+        "providers": { "type": "array", "items": { "type": "string", "minLength": 1 } },
+        "hooks":     { "type": "array", "items": { "type": "string", "enum": ["pre-tool","post-tool","compaction-trigger","verify-gate","on-event"] } },
+        "config":    { "type": "object", "additionalProperties": { "type": "object", "required": ["type"], "additionalProperties": false, "properties": { "type": { "enum": ["string","number","boolean"] } } } }
+      }
+    },
+    "description":  { "type": "string", "minLength": 1, "maxLength": 280 },
+    "licence":      { "type": "string", "minLength": 1, "pattern": "^[A-Za-z0-9.+-]+$" },
+    "author":       { "type": "string" },
+    "homepage":     { "type": "string" }
+  }
+}

@@ -1,0 +1,1 @@
+{"manifest":"compact-plus","version":"2.0.0","compat":"0.1.0","capabilities":{"hooks":["compaction-trigger"]},"description":"custom compaction policy","licence":"BSD-3-Clause"}

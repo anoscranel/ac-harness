@@ -1,0 +1,1 @@
+{"manifest":"echo-provider","version":"0.0.1","compat":"^0.1.0","capabilities":{"providers":["echo-plus"]},"description":"extra echo provider","licence":"ISC"}

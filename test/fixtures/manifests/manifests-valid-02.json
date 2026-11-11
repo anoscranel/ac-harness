@@ -1,0 +1,1 @@
+{"manifest":"web-reader","version":"1.2.3","compat":">=0.1.0","capabilities":{"tools":["fetch_url"],"config":{"base_url":{"type":"string"}}},"description":"read a public URL","licence":"Apache-2.0","author":"harness","homepage":"https://example.invalid/web-reader"}

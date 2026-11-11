@@ -1,0 +1,15 @@
+{
+  "manifest": "compact-smart",
+  "version": "1.0.0",
+  "compat": "^0.1.0",
+  "capabilities": {
+    "hooks": ["compaction-trigger"],
+    "config": {
+      "ratio": { "type": "number" },
+      "tail_turns": { "type": "number" },
+      "older_than": { "type": "number" }
+    }
+  },
+  "description": "tiered deterministic compaction-trigger policy: pressure ladder over tool-results then old assistant messages",
+  "licence": "MIT"
+}

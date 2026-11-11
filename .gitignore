@@ -1,0 +1,7 @@
+# Event logs are local-only: attestations quote hashes, never log contents.
+logs/
+*.jsonl
+!fixtures/events.v1.jsonl
+# Per-user local plugin config (may hold absolute allowed_roots) — never commit.
+plugins.config.json
+node_modules/

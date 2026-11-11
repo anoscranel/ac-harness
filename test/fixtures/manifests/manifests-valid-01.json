@@ -1,0 +1,1 @@
+{"manifest":"health","version":"0.0.1","compat":"^0.1.0","capabilities":{"hooks":["on-event"]},"description":"emits health status lines","licence":"MIT"}

@@ -1,0 +1,10 @@
+agent-harness
+Copyright 2026 The agent-harness contributors.
+
+This product includes software developed by the agent-harness contributors,
+licensed under the Apache License, Version 2.0 (see LICENSE).
+
+The npm dependency tree of this package is EMPTY by design: every runtime
+import is a Node.js builtin. The only external runtime dependency is the
+ripgrep binary (`rg`, MIT / Unlicense, https://github.com/BurntSushi/ripgrep),
+invoked as a subprocess by the grep tool and never linked or vendored.

@@ -1,0 +1,222 @@
+// src/server.js — headless JSON-RPC 2.0 server over NDJSON stdio.
+// One object per line, no headers. Methods:
+//   session.create  { logPath?, session?, provider?, baseUrl?, model?, apiKeyEnv? }
+//   session.prompt  { input }            → runs a turn; events stream down as
+//                                          { method:"session.event" } notifications
+//   session.cancel  {}                   → abort the current turn
+//   session.events  {}                   → subscribe: replay + live events
+// policy.ask is resolved OVER THE WIRE: the server sends the client a
+// JSON-RPC request { method:"policy.ask", params:{ call_id, tool, args } }
+// and waits up to 30s; timeout/no-client = deny (policy.ask.resolved logged).
+
+import { createInterface } from "node:readline";
+import { resolve } from "node:path";
+import { EventLog } from "./events.js";
+import { Policy, loadRulesFile } from "./policy.js";
+import { defaultRules } from "./policy-defaults.js";
+import { createRegistry } from "./tools/index.js";
+import echo from "./providers/echo.js";
+import { createOpenAICompatProvider } from "./providers/openai-compat.js";
+import { decide } from "./context.js";
+import { createLoop } from "./loop.js";
+import { createDefaultVerifyGate } from "./verify.js";
+import { loadPlugins, wirePluginHooks } from "./plugins/loader.js";
+
+const HARNESS_VERSION = "0.1.0";
+const REPO_ROOT = resolve(new URL("..", import.meta.url).pathname);
+
+function send(obj) {
+  process.stdout.write(JSON.stringify(obj) + "\n");
+}
+function respond(id, result) {
+  send({ jsonrpc: "2.0", id, result });
+}
+function respondError(id, code, message) {
+  send({ jsonrpc: "2.0", id, error: { code, message } });
+}
+function notify(method, params) {
+  send({ jsonrpc: "2.0", method, params });
+}
+
+// Outgoing requests to the client (policy.ask), matched by id.
+// F28 (review-r1): every outgoing request carries its own 30s sweep timer —
+// a timed-out or never-answered ask must not retain its pending entry.
+const pending = new Map();
+let nextClientId = 1;
+function requestClient(method, params) {
+  const id = `srv-${nextClientId++}`;
+  return new Promise((resolvePromise) => {
+    const timer = setTimeout(() => {
+      pending.delete(id);
+      resolvePromise(undefined);
+    }, 30_000);
+    pending.set(id, (value) => {
+      clearTimeout(timer);
+      pending.delete(id);
+      resolvePromise(value);
+    });
+    send({ jsonrpc: "2.0", id, method, params });
+  });
+}
+
+const sessions = new Map(); // session_id -> { loop, log, subscribers:Set }
+
+async function createSession(params) {
+  const sessionId = params.session ?? `s-${Date.now()}`;
+  const logPath = params.logPath ?? `logs/${sessionId}.jsonl`;
+  const log = await EventLog.open(logPath);
+
+  let rules = defaultRules();
+  if (params.rulesPath) {
+    try {
+      rules = [...rules, ...(await loadRulesFile(params.rulesPath))];
+    } catch (err) {
+      // Unparseable rule file = startup refusal, logged (policy.error).
+      await log.appendEvent("policy.error", "policy", {
+        message: err.message,
+        source: params.rulesPath,
+      });
+      throw err;
+    }
+  }
+  const policy = new Policy({ rules, logPath });
+
+  let provider = echo;
+  if (params.provider === "openai-compat") {
+    provider = createOpenAICompatProvider({
+      baseUrl: params.baseUrl,
+      model: params.model,
+      apiKey: params.apiKeyEnv ? process.env[params.apiKeyEnv] : undefined,
+    });
+  }
+
+  const askResolver = async (ask) => {
+    const answer = await requestClient("policy.ask", ask);
+    return answer === "allow" || answer === "deny" ? answer : undefined;
+  };
+
+  // F22 (review-r1): plugins are loadable via config — discovery, validation
+  // and capability registration run at session.create. 6.5 (audit-a2): the
+  // default plugins/ dir is anchored on the REPO ROOT, not the launch cwd.
+  const pluginHost = await loadPlugins({
+    dir: params?.pluginsDir ? resolve(params.pluginsDir) : resolve(REPO_ROOT, "plugins"),
+    harnessVersion: HARNESS_VERSION,
+    log,
+  });
+  // TB0: activate hook plugins and merge their hooks/decisions into the loop.
+  // Single-hook winners override the built-in decide / verify gate.
+  const wired = await wirePluginHooks(pluginHost, log, { config: params?.pluginConfig ?? {} });
+
+  const loop = createLoop({
+    provider,
+    tools: createRegistry(),
+    policy,
+    log,
+    decide: wired.decide ?? decide,
+    askResolver,
+    config: { session: sessionId, harness_version: HARNESS_VERSION },
+    hooks: {
+      preTool: wired.preTool,
+      postTool: wired.postTool,
+      onEvent: wired.onEvent,
+      verifyGate: wired.verifyGate ?? createDefaultVerifyGate({ cwd: REPO_ROOT }),
+      decidePlugin: wired.decidePlugin, // 6.1: owner names for containment
+      verifyGatePlugin: wired.verifyGatePlugin,
+    },
+  });
+
+  const session = { loop, log, pluginHost, subscribers: new Set() };
+  log.on("event", (ev) => {
+    for (const cb of session.subscribers) cb(ev);
+  });
+  sessions.set(sessionId, session);
+  return { sessionId, logPath };
+}
+
+async function handle(method, params) {
+  switch (method) {
+    case "session.create": {
+      const { sessionId, logPath } = await createSession(params ?? {});
+      return { session_id: sessionId, log_path: logPath, harness_version: HARNESS_VERSION };
+    }
+    case "session.prompt": {
+      const session = sessions.get(params?.session_id ?? [...sessions.keys()].at(-1));
+      if (!session) throw Object.assign(new Error("no such session"), { code: -32602 });
+      const result = await session.loop.start(params.input ?? "");
+      return { text: result.text, aborted: result.aborted === true };
+    }
+    case "session.cancel": {
+      const session = sessions.get(params?.session_id ?? [...sessions.keys()].at(-1));
+      if (!session) throw Object.assign(new Error("no such session"), { code: -32602 });
+      session.loop.abort();
+      return { ok: true };
+    }
+    case "session.events": {
+      const session = sessions.get(params?.session_id ?? [...sessions.keys()].at(-1));
+      if (!session) throw Object.assign(new Error("no such session"), { code: -32602 });
+      for (const ev of session.log.events) notify("session.event", ev); // replay
+      session.subscribers.add((ev) => notify("session.event", ev)); // live
+      return { ok: true, subscribed: true };
+    }
+    default:
+      throw Object.assign(new Error(`method not found: ${method}`), { code: -32601 });
+  }
+}
+
+async function main() {
+  // D5 (repair-4): a piped server (… | head) must exit quietly on EPIPE,
+  // not stack-dump — same handler shape as cli.js's main().
+  process.stdout?.on?.("error", (err) => {
+    if (err?.code === "EPIPE") process.exit(0);
+    throw err;
+  });
+  const rl = createInterface({ input: process.stdin, crlfDelay: Infinity });
+  let chain = Promise.resolve(); // sequential method dispatch (see below)
+  for await (const line of rl) {
+    const trimmed = line.trim();
+    if (!trimmed) continue;
+    let msg;
+    try {
+      msg = JSON.parse(trimmed);
+    } catch {
+      respondError(null, -32700, "parse error");
+      continue;
+    }
+    // A response to one of OUR outgoing requests (policy.ask)?
+    if (msg.id !== undefined && pending.has(msg.id) && msg.method === undefined) {
+      const resolvePending = pending.get(msg.id);
+      pending.delete(msg.id);
+      resolvePending(msg.result?.verdict ?? msg.result);
+      continue;
+    }
+    if (msg.method === undefined) continue;
+    const id = msg.id;
+    // Methods dispatch through a sequential chain (session.create must land
+    // before a pipelined session.prompt). The policy.ask ANSWER path above is
+    // NOT a method: it resolves inline in this loop, so an in-flight prompt
+    // waiting on an ask never deadlocks the reader.
+    chain = chain
+      .then(() => handle(msg.method, msg.params))
+      .then((result) => {
+        if (id !== undefined) respond(id, result);
+      })
+      .catch((err) => {
+        if (id !== undefined) respondError(id, err.code ?? -32603, err.message);
+      });
+  }
+
+  // F28: client disconnect = full cleanup. Sweep pending asks (they resolve
+  // undefined → headless-timeout deny) and drop all sessions.
+  for (const [, resolvePending] of pending) resolvePending(undefined);
+  pending.clear();
+  sessions.clear();
+}
+
+if (import.meta.url === `file://${process.argv[1]}`) {
+  main().catch((err) => {
+    process.stderr.write(`server fatal: ${err.message}\n`);
+    process.exit(1);
+  });
+}
+
+export { main as serve };
