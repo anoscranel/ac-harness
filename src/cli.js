@@ -15,7 +15,7 @@ import { createInterface } from "node:readline";
 import { resolve } from "node:path";
 import { EventLog, readAll, canonicalize, sha256 } from "./events.js";
 
-const HARNESS_VERSION = "0.1.0";
+const HARNESS_VERSION = "0.3.0";
 
 async function replayCommand(logPath) {
   const events = await readAll(logPath);
@@ -44,6 +44,7 @@ async function chat() {
   const { defaultRules } = await import("./policy-defaults.js");
   const { createRegistry } = await import("./tools/index.js");
   const { default: echo } = await import("./providers/echo.js");
+  const { defaultProviderFor } = await import("./providers/registry.js");
   const { decide } = await import("./context.js");
   const { createLoop } = await import("./loop.js");
   const { createDefaultVerifyGate } = await import("./verify.js");
@@ -76,6 +77,20 @@ async function chat() {
   // 6.4 (audit-a2): the decide the LOOP uses — /compact must report the same.
   const effectiveDecide = wired.decide ?? decide;
 
+  // no-default-provider A2: FIRST user-configured profile or echo. No network
+  // probing ever. Same pre-createInterface rule as the plugin load above
+  // (deviation 16b: any await between createInterface and handler attachment
+  // closes piped stdin's readline).
+  const defaultRow = await defaultProviderFor(process.env, { profiles: [] });
+  const provider = defaultRow
+    ? (await import("./providers/openai-compat.js")).createOpenAICompatProvider({
+        id: defaultRow.id,
+        baseUrl: defaultRow.baseUrl,
+        model: defaultRow.model,
+        apiKey: process.env[defaultRow.apiKeyEnv],
+      })
+    : echo;
+
   const rl = createInterface({ input: process.stdin, output: process.stdout, prompt: "> " });
 
   // REPL ask channel: prompt the user, 30s timeout (headless-timeout deny).
@@ -94,8 +109,17 @@ async function chat() {
       });
     });
 
+  // no-default-provider A2: announce the chosen provider BEFORE the prompt.
+  // (this block is post-createInterface; only the SETUP moved up — the
+  // provider object already exists, no further awaits.)
+  process.stdout.write(
+    defaultRow
+      ? `\x1b[2mdefault provider: ${defaultRow.id}/${defaultRow.model ?? "?"} (from providers.config.json|env)\x1b[0m${"\n"}`
+      : "\x1b[2mno provider configured \u2014 using echo (offline); add one via the TUI ? panel or HARNESS_PROVIDER_<ID>_BASE_URL env vars\x1b[0m\n",
+  );
+
   const loop = createLoop({
-    provider: echo,
+    provider,
     tools: createRegistry(),
     policy,
     log,
@@ -121,7 +145,7 @@ async function chat() {
   }
 
   process.stdout.write(
-    `agent-harness ${HARNESS_VERSION} — echo provider, log: ${logPath}\n` +
+    `ac-harness ${HARNESS_VERSION} — ${provider.id} provider, log: ${logPath}\n` +
       "commands: /policy /resume [seq] /compact /replay /quit\n",
   );
   rl.prompt();

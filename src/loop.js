@@ -15,6 +15,7 @@
 import { resolveAsk } from "./policy.js";
 import { sha256 } from "./events.js";
 import { decide as builtinDecide } from "./context.js";
+import { TokenCache, estimateTokens } from "./tokens.js";
 
 /** 6.2 (audit-a2): ONE shared compaction applier — run path and resume path
  *  call this same code, so replay mirrors apply byte-for-byte. Applies to
@@ -63,6 +64,13 @@ export function createLoop({
   hooks = {},
 }) {
   const cfg = { ...DEFAULTS, ...config };
+  // no-default-token-cache B3: per-loop prefix token cache (config-injectable
+  // for tests via config.tokenCache). Advisory-observability in v1: providers
+  // always receive the full body; the cache only makes repeated local token
+  // counting O(delta) and surfaces prefix overlap in the request event.
+  const tokenCache = config.tokenCache instanceof TokenCache
+    ? config.tokenCache
+    : new TokenCache();
   // F1 (review-r1): one AbortController PER TURN. abort() cancels the
   // in-flight turn only; the next start() gets a fresh controller, so a
   // post-abort session is not bricked.
@@ -84,7 +92,58 @@ export function createLoop({
     totalInput: 0,
     totalOutput: 0,
     lastUsage: null,
+    // provider-admin §1: the LIVE provider. Every provider read in runTurn
+    // goes through state.provider (never the closure `provider` binding), so
+    // setProvider() swaps take effect at turn boundaries.
+    provider,
   };
+
+  // Queued provider swap: setProvider during an in-flight turn defers to the
+  // turn boundary (same discipline as the compaction seam — no mid-stream
+  // swaps). turnInFlight is bookkeeping only; runTurn sets/clears it.
+  let pendingProvider = null;
+  let turnInFlight = false;
+
+  /**
+   * Swap the active provider (provider-admin §1).
+   * BETWEEN turns: applies immediately and emits session.provider.switch.
+   * DURING a turn: queues the swap; the turn boundary applies it and emits
+   * the same event. Idempotent guard: switching to the already-active
+   * provider is a no-op (no event). Never called = zero behavior change.
+   * @param {{id:string, model:string, stream:Function}} p
+   */
+  async function setProvider(p) {
+    if (!p || typeof p.id !== "string" || typeof p.stream !== "function") {
+      throw new Error("setProvider requires a provider object {id, model, stream}");
+    }
+    if (state.provider && p.id === state.provider.id && p.model === state.provider.model) {
+      return false; // already active — no-op, no event
+    }
+    if (turnInFlight) {
+      pendingProvider = Object.freeze({ ...p }); // queue; applied at the boundary
+      return true;
+    }
+    await applyProviderSwitch(p);
+    return true;
+  }
+
+  async function applyProviderSwitch(p) {
+    const from = state.provider?.id ?? "none";
+    state.provider = p;
+    await log.appendEvent("session.provider.switch", "harness", {
+      from,
+      to: p.id,
+      model: p.model ?? "default",
+    });
+  }
+
+  /** Called by runTurn at each turn boundary: apply a queued swap, if any. */
+  async function flushQueuedProvider() {
+    if (pendingProvider === null) return;
+    const p = pendingProvider;
+    pendingProvider = null;
+    await applyProviderSwitch(p);
+  }
 
   // onEvent chain hooks observe every appended event, with a circuit breaker
   // (TB0): 3 consecutive throws from the same plugin hook → that hook is
@@ -251,10 +310,19 @@ export function createLoop({
     return { output, ok: result.ok, path: result.path };
   }
 
+  /**
+   * runTurn — one reason→act→observe turn. provider-admin §1: the ENTIRE turn
+   * (iteration loop + verify gate + compaction boundary) owns turnInFlight;
+   * a queued setProvider applies only in the finally — i.e. strictly between
+   * turns, never while a stream, tool call, gate, or compaction decision is
+   * still able to read state.provider.
+   */
   async function runTurn(input) {
     // F1: fresh controller for THIS turn; abort() below cancels only this one.
     turnController = new AbortController();
     const signal = turnController.signal;
+    turnInFlight = true;
+    try {
     state.turns += 1;
     const turn = state.turns;
     const turnIndex = turn - 1;
@@ -276,12 +344,23 @@ export function createLoop({
     let turnTruncated = false; // F17: provider stream ended without [DONE]
     let iterationsExhausted = true; // F21: set false only on a clean break
     for (let iter = 0; iter < cfg.max_iterations; iter++) {
+      const provider = state.provider; // provider-admin: live seam read
       const toolSchemas = tools.schemas();
+      // no-default-token-cache B3: count BEFORE the provider call — repeated
+      // prefixes hit the cache; the count is recorded in the request event
+      // (additive fields; deterministic from content, never wall-clock).
+      // MsgMeta token_len is attached at the same time (decide() input).
+      const { tokens: prefixTokens, cached: prefixCached } = tokenCache.countPrefix(state.messages);
+      for (const m of state.messages) {
+        if (m.token_len === undefined) m.token_len = estimateTokens(m.content ?? "");
+      }
       await log.appendEvent("turn.provider.request", "provider", {
         provider: provider.id,
         model: provider.model ?? "default",
         messages: state.messages.length,
         tools: toolSchemas.length,
+        prefix_tokens: prefixTokens,
+        prefix_cached: prefixCached === true,
       });
 
       let text = "";
@@ -313,8 +392,8 @@ export function createLoop({
         }
         throw err;
       }
-      if (!final) throw new Error("provider stream ended without a final frame");
-      if (final.truncated === true) turnTruncated = true;
+        if (!final) throw new Error("provider stream ended without a final frame");
+        if (final.truncated === true) turnTruncated = true;
 
       const u = final.usage ?? { input_tokens: 0, cached_tokens: 0, output_tokens: 0 };
       await log.appendEvent("turn.provider.response", "provider", {
@@ -337,53 +416,53 @@ export function createLoop({
       state.totalOutput += u.output_tokens;
       state.lastUsage = { ...u, estimate: final.estimate === true };
 
-      const assistantSpan = {
-        first: chunkSeqs[0] ?? turnStartEv.seq,
-        last: chunkSeqs[chunkSeqs.length - 1] ?? turnStartEv.seq,
-      };
-      state.messages.push({
-        role: "assistant",
-        kind: "assistant",
-        content: text,
-        turn_index: turnIndex,
-        pinned: false,
-        event_span: assistantSpan,
-      });
-      finalText = text;
-
-      const calls = final.tool_calls ?? [];
-      if (calls.length === 0) {
-        iterationsExhausted = false;
-        break;
-      }
-
-      for (const call of calls) {
-        const proposedSeq = log.seq; // next seq = the tool.proposed we are about to write
-        const { output, ok, path: resultPath } = await runToolCall(call);
-        const resultSeq = log.seq - 1; // last written = the tool.result
+        const assistantSpan = {
+          first: chunkSeqs[0] ?? turnStartEv.seq,
+          last: chunkSeqs[chunkSeqs.length - 1] ?? turnStartEv.seq,
+        };
         state.messages.push({
-          role: "tool",
-          kind: "tool-result",
-          content: output,
+          role: "assistant",
+          kind: "assistant",
+          content: text,
           turn_index: turnIndex,
           pinned: false,
-          call_id: call.call_id,
-          event_span: { first: proposedSeq, last: resultSeq },
+          event_span: assistantSpan,
         });
-        // F19: a successful write/edit result carries the resolved path.
-        if (ok && resultPath && (call.name === "write" || call.name === "edit")) {
-          editedFiles.push(resultPath);
+        finalText = text;
+
+        const calls = final.tool_calls ?? [];
+        if (calls.length === 0) {
+          iterationsExhausted = false;
+          break;
+        }
+
+        for (const call of calls) {
+          const proposedSeq = log.seq; // next seq = the tool.proposed we are about to write
+          const { output, ok, path: resultPath } = await runToolCall(call);
+          const resultSeq = log.seq - 1; // last written = the tool.result
+          state.messages.push({
+            role: "tool",
+            kind: "tool-result",
+            content: output,
+            turn_index: turnIndex,
+            pinned: false,
+            call_id: call.call_id,
+            event_span: { first: proposedSeq, last: resultSeq },
+          });
+          // F19: a successful write/edit result carries the resolved path.
+          if (ok && resultPath && (call.name === "write" || call.name === "edit")) {
+            editedFiles.push(resultPath);
+          }
         }
       }
-    }
 
-    // F21 (review-r1): hitting max_iterations is no longer silent.
-    if (iterationsExhausted) {
-      await log.appendEvent("session.error", "harness", {
-        message: `max_iterations (${cfg.max_iterations}) reached; turn ended with pending tool calls`,
-        code: "max-iterations",
-      });
-    }
+      // F21 (review-r1): hitting max_iterations is no longer silent.
+      if (iterationsExhausted) {
+        await log.appendEvent("session.error", "harness", {
+          message: `max_iterations (${cfg.max_iterations}) reached; turn ended with pending tool calls`,
+          code: "max-iterations",
+        });
+      }
 
     // Verify gate: runs after any turn that edited files (F19 — tracked from
     // tool result payloads above; wired by cli.js / server.js).
@@ -457,6 +536,10 @@ export function createLoop({
       byte_len: Buffer.byteLength(m.content ?? "", "utf8"),
       kind: m.kind,
       event_span: m.event_span,
+      // no-default-token-cache B3: additive MsgMeta field. Lazily computed
+      // here so EVERY message (incl. an assistant reply pushed late in the
+      // final iteration) carries an integer by decide() time.
+      token_len: Number.isInteger(m.token_len) ? m.token_len : estimateTokens(m.content ?? ""),
     }));
     // 6.1 (audit-a2): a throwing plugin decide is contained; the harness
     // falls back to the BUILT-IN default decide (kept reachable here even
@@ -499,6 +582,16 @@ export function createLoop({
     }
 
     return { text: finalText, aborted: false, truncated: turnTruncated };
+    } finally {
+      // provider-admin §1: the turn boundary. The in-flight flag drops first
+      // so a queued setProvider now sees a between-turns state; then the
+      // queued swap applies and emits session.provider.switch BEFORE the next
+      // turn reads state.provider. Every exit path (clean return, verify-gate
+      // deny, block, throw, abort) reaches this finally — a queued switch is
+      // never lost and never applied mid-turn.
+      turnInFlight = false;
+      await flushQueuedProvider();
+    }
   }
 
   async function start(input) {
@@ -688,6 +781,7 @@ export function createLoop({
     abort,
     events,
     end,
+    setProvider, // provider-admin §1: boundary-only live provider swap
     state,
     get signal() {
       return turnController.signal;

@@ -19,12 +19,16 @@ import { EventEmitter } from "node:events";
 
 /** Exhaustive v1 event-type set (specs/invariants.md §2). Added to, never removed.
  *  `session.branch` added by repair-2 (review-r1 F9): records a time-travel
- *  fork so later resumes can mask the abandoned tail. */
+ *  fork so later resumes can mask the abandoned tail. `session.provider.switch`
+ *  added by provider-admin (specs/tui/tui-provider-admin.md §4): records a
+ *  runtime provider swap (boundary-only; queued swaps apply at the turn
+ *  boundary). Both additive, never removed. */
 export const EVENT_TYPES = Object.freeze([
   "session.start",
   "session.end",
   "session.error",
   "session.branch",
+  "session.provider.switch",
   "turn.start",
   "turn.provider.request",
   "turn.provider.chunk",
@@ -66,8 +70,9 @@ const DATA_KEY_ORDER = Object.freeze({
   "session.end": ["turns", "total_input_tokens", "total_output_tokens", "total_cost_micro_usd"],
   "session.error": ["message", "code"],
   "session.branch": ["from_seq", "new_base_seq"],
+  "session.provider.switch": ["from", "to", "model"],
   "turn.start": ["turn", "input"],
-  "turn.provider.request": ["provider", "model", "messages", "tools"],
+  "turn.provider.request": ["provider", "model", "messages", "tools", "prefix_tokens", "prefix_cached"],
   "turn.provider.chunk": ["delta", "done"],
   "turn.provider.response": ["finish", "input_tokens", "cached_tokens", "output_tokens", "estimate", "truncated"],
   "tool.proposed": ["call_id", "tool", "args", "args_sha"],

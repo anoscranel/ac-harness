@@ -1,6 +1,6 @@
 {"seq":0,"ts":1771670400.001,"type":"session.start","actor":"harness","data":{"harness_version":"0.1.0","session":"demo","config_sha":"abcdef"}}
 {"seq":1,"ts":1771670400.002,"type":"turn.start","actor":"harness","data":{"turn":1,"input":"hi"}}
-{"seq":2,"ts":1771670400.003,"type":"turn.provider.request","actor":"provider","data":{"provider":"echo","model":"echo","messages":2,"tools":4}}
+{"seq":2,"ts":1771670400.003,"type":"turn.provider.request","actor":"provider","data":{"provider":"echo","model":"echo","messages":2,"tools":4,"prefix_tokens":11,"prefix_cached":true}}
 {"seq":3,"ts":1771670400.010,"type":"turn.provider.chunk","actor":"provider","data":{"delta":"Hi!","done":false}}
 {"seq":4,"ts":1771670400.011,"type":"turn.provider.response","actor":"provider","data":{"finish":"stop","input_tokens":42,"cached_tokens":0,"output_tokens":10,"estimate":false}}
 {"seq":5,"ts":1771670400.012,"type":"tool.proposed","actor":"harness","data":{"call_id":"c1","tool":"read","args":{"path":"/tmp/x.txt"},"args_sha":"c2f7"}}
@@ -15,3 +15,4 @@
 {"seq":14,"ts":1771670400.026,"type":"policy.ask.resolved","actor":"policy","data":{"call_id":"c9","verdict":"deny","resolved_by":"headless-timeout","timeout_ms":30000}}
 {"seq":15,"ts":1771670400.030,"type":"compaction.applied","actor":"compaction","data":{"version":1,"ranges":[{"start":0,"end":2,"event_log_span":{"first":3,"last":7}}],"strategy":"summarise","freed_events":5}}
 {"seq":16,"ts":1771670400.031,"type":"session.end","actor":"harness","data":{"turns":1,"total_input_tokens":42,"total_output_tokens":10,"total_cost_micro_usd":0}}
+{"seq":17,"ts":1771670400.032,"type":"session.provider.switch","actor":"harness","data":{"from":"echo","to":"openai","model":"gpt-x"}}

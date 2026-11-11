@@ -5,10 +5,7 @@
 // emits usage.estimated). Env proxies are NOT honoured by default (README §
 // proxy caveat); pass a custom dispatcher via opts if you need one.
 //
-// review-r1 hardening:
-//  F15 — 429/5xx admission: respect Retry-After, else bounded exponential
-//        backoff with ±25% jitter; max 3 attempts, then throw (the loop logs
-//        session.error — the "logged event").
+// review-r1 hardening (F16/F17/F18 kept; F15 REPLACED — see below):
 //  F16 — finish_reason mapped faithfully: stop/length/content_filter/
 //        tool_calls; anything else falls back to "stop".
 //  F17 — a stream ending without [DONE] yields a final frame with
@@ -16,12 +13,32 @@
 //  F18 — per-chunk idle timeout (30s) aborts a stalled stream; multi-line
 //        `data:` events are aggregated before JSON.parse (spec-legal SSE).
 //
+// provider-endurance (2026-11-11): F15's 3-attempt loop is REPLACED by one
+// 24h endurance window PER REQUEST (specs/tui/provider-endurance.md §1):
+//  - retry every flat 5s (Retry-After wins when present, capped at 60s);
+//  - RETRY-FOREVER classes: 429, 408, 5xx, network errors, rate-limit-text
+//    bodies, 200-with-error-payload, missing-[DONE] streams;
+//  - deterministic 400/401/403/404/422 fail fast EXCEPT 401/403 from a
+//    localhost upstream (local-proxy restart window — transient);
+//  - AbortError always exits instantly; SSE-committed streams never re-attempted;
+//  - every 12th retry surfaces via the optional onRetry(attempt, status)
+//    callback so a 24h wait is never silent (events stay unchanged).
+// Tests inject sleepFn/fetchFn (real timers, fake clock) via these module-level
+// seams — production defaults are untouched.
+//
 // Stream protocol: same as src/providers/echo.js.
 
-const MAX_ATTEMPTS = 3;
+const DEFAULT_RETRY_INTERVAL_MS = 5_000;
+const DEFAULT_ENDURANCE_MS = 24 * 60 * 60 * 1000;
+const RETRY_AFTER_CAP_MS = 60_000;
+const ON_RETRY_EVERY = 12; // dim "…retrying" cadence
 const IDLE_TIMEOUT_MS = 30_000;
 
-function sleep(ms, signal) {
+/** Rate-limit-shaped body text (case-insensitive) — retry-forever class. */
+export const RATE_LIMIT_RE =
+  /rate limit|too many requests|quota|429|overloaded|capacity|per.minute|per.hour/i;
+
+function defaultSleep(ms, signal) {
   return new Promise((res, rej) => {
     const t = setTimeout(res, ms);
     signal?.addEventListener("abort", () => {
@@ -33,14 +50,36 @@ function sleep(ms, signal) {
   });
 }
 
-/** Bounded exponential backoff with ±25% jitter; Retry-After wins. */
-function retryDelayMs(attempt, retryAfterHeader) {
-  const ra = Number(retryAfterHeader);
-  if (Number.isFinite(ra) && ra >= 0) return Math.min(ra * 1000, 60_000);
-  const base = 500 * 2 ** attempt;
-  const jitter = base * 0.25 * (Math.random() * 2 - 1);
-  return Math.min(base + jitter, 30_000);
+/** Retry-After header wins (seconds → ms, capped at 60s); flat intervalMs
+ *  otherwise. Pure — exported for tests. Strict on the header: null/""/NaN
+ *  never parse as a 0s Retry-After (Number(null) === 0 — the flat-5s path
+ *  must win when the header is absent). */
+export function retryDelayMs(retryAfterHeader, { intervalMs = DEFAULT_RETRY_INTERVAL_MS } = {}) {
+  if (typeof retryAfterHeader === "string") {
+    const ra = Number(retryAfterHeader.trim());
+    if (retryAfterHeader.trim() !== "" && Number.isFinite(ra) && ra >= 0) {
+      return Math.min(ra * 1000, RETRY_AFTER_CAP_MS);
+    }
+  }
+  return intervalMs;
 }
+
+/** Localhost upstream? (127.0.0.1 / localhost / [::1]) — its 401/403 may be the
+ *  local proxy's own restart window, so those retry (real endpoints stay
+ *  fail-fast). Pure — exported for tests. */
+export function isLocalhost(baseUrl) {
+  try {
+    const u = new URL(baseUrl);
+    const h = u.hostname.replace(/^\[|\]$/g, ""); // URL keeps IPv6 brackets
+    return h === "127.0.0.1" || h === "localhost" || h === "::1";
+  } catch {
+    return false;
+  }
+}
+
+/** Sentinel: deterministic client errors fail FAST — the throw must escape the
+ *  network-error catch below, so it is tagged and re-thrown untouched. */
+class FailFastError extends Error {}
 
 function mapFinishReason(reason) {
   switch (reason) {
@@ -60,9 +99,17 @@ export function createOpenAICompatProvider({
   apiKey,
   model,
   dispatcher, // optional undici-style dispatcher seam; undefined = default
+  retryPolicy, // {intervalMs?, enduranceMs?} — endurance window tuning (§1)
+  onRetry, // optional (attempt, status) => void — every ON_RETRY_EVERY'th retry
+  sleepFn = defaultSleep, // injection seam for tests (fake clock)
+  fetchFn = fetch, // injection seam for tests (fake endpoints)
+  nowFn = Date.now, // injection seam for tests (fake window clock)
 } = {}) {
   if (!baseUrl) throw new Error("openai-compat provider requires baseUrl");
   if (!model) throw new Error("openai-compat provider requires model");
+  const intervalMs = retryPolicy?.intervalMs ?? DEFAULT_RETRY_INTERVAL_MS;
+  const enduranceMs = retryPolicy?.enduranceMs ?? DEFAULT_ENDURANCE_MS;
+  const localhost = isLocalhost(baseUrl);
 
   async function* stream(request, { signal } = {}) {
     const body = {
@@ -85,33 +132,65 @@ export function createOpenAICompatProvider({
     const headers = { "content-type": "application/json" };
     if (apiKey) headers.authorization = `Bearer ${apiKey}`;
 
-    // F15: bounded retry on 429/5xx.
+    // provider-endurance §1: ONE 24h window per request. The window opens at
+    // the first failed attempt; every RETRY-FOREVER class retries at the flat
+    // interval (Retry-After wins, capped); deterministic client errors fail
+    // fast — except 401/403 from a localhost upstream (proxy restart window).
+    // AbortError exits instantly; a stream that COMMITTED (status ok, body
+    // open) is never re-attempted — post-code-200 breakage is F17's business.
     let res = null;
     let lastErr = null;
-    for (let attempt = 0; attempt < MAX_ATTEMPTS; attempt++) {
+    const windowStart = nowFn();
+    for (let attempt = 0; ; attempt++) {
+      if (attempt > 0 && nowFn() - windowStart > enduranceMs) {
+        throw lastErr ?? new Error("provider endurance window exhausted (24h)");
+      }
+      if (attempt > 0 && attempt % ON_RETRY_EVERY === 0 && typeof onRetry === "function") {
+        try {
+          onRetry(attempt, lastErr?.status ?? null);
+        } catch {
+          /* an onRetry throw must never break the retry loop */
+        }
+      }
       try {
-        res = await fetch(`${baseUrl.replace(/\/$/, "")}/chat/completions`, {
+        res = await fetchFn(`${baseUrl.replace(/\/$/, "")}/chat/completions`, {
           method: "POST",
           headers,
           body: JSON.stringify(body),
           signal,
           ...(dispatcher ? { dispatcher } : {}),
         });
-        if (res.ok && res.body) break;
-        if (res.status === 429 || res.status >= 500) {
-          const delay = retryDelayMs(attempt, res.headers.get("retry-after"));
-          if (attempt < MAX_ATTEMPTS - 1) await sleep(delay, signal);
-          lastErr = new Error(`provider HTTP ${res.status}`);
+        if (res.ok && res.body) break; // COMMITTED — never re-attempted past here
+        const status = res.status;
+        const retryAfterHeader = res.headers?.get?.("retry-after") ?? null;
+        const tail = (await res.text().catch(() => "")).slice(0, 500); // consumed once
+
+        const retryableStatus =
+          status === 429 || status === 408 || status >= 500 ||
+          ((status === 401 || status === 403) && localhost);
+        const rateText = !retryableStatus && RATE_LIMIT_RE.test(tail);
+        const json200Err =
+          status === 200 && /^\s*\{/.test(tail) && /"error"/i.test(tail);
+
+        if (retryableStatus || rateText || json200Err) {
+          const err = new Error(
+            json200Err ? `provider 200-with-error: ${tail}` : `provider HTTP ${status}`,
+          );
+          err.status = status;
+          lastErr = err;
           res = null;
+          await sleepFn(retryDelayMs(retryAfterHeader, { intervalMs }), signal);
           continue;
         }
-        const tail = (await res.text().catch(() => "")).slice(0, 500);
-        throw new Error(`provider HTTP ${res.status}: ${tail}`);
+        throw new FailFastError(`provider HTTP ${status}: ${tail}`); // fail-fast class
       } catch (err) {
-        if (err?.name === "AbortError") throw err;
+        if (err?.name === "AbortError") throw err; // abort ALWAYS exits (§1)
+        if (err instanceof FailFastError) throw err; // deterministic — no retry
         lastErr = err;
         res = null;
-        if (attempt < MAX_ATTEMPTS - 1) await sleep(retryDelayMs(attempt, null), signal);
+        // Network errors (ECONNREFUSED/ETIMEDOUT/EAI_AGAIN/socket hang up…)
+        // are retry-forever — only the endurance window bounds them.
+        await sleepFn(retryDelayMs(null, { intervalMs }), signal);
       }
     }
     if (!res) throw lastErr ?? new Error("provider request failed after retries");

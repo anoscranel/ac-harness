@@ -13,7 +13,7 @@
 
 import { resolve } from "node:path";
 
-const HARNESS_VERSION = "0.1.0";
+const HARNESS_VERSION = "0.3.0";
 const DISPLAY_NAME = "ac-harness";
 // --- TTY gate (before any wiring): graceful non-TTY exit --------------------
 if (!process.stdout.isTTY || process.env.TERM === "dumb") {
@@ -41,6 +41,9 @@ async function main() {
   const { createComposer, parseSubmission, splitKeys } = await import("./composer.js");
   const { createAsk } = await import("./ask.js");
   const R = await import("./renderers.js");
+  const { createProviderPanel } = await import("./provider-panel.js");
+  const registry = await import("../providers/registry.js");
+  const { createOpenAICompatProvider } = await import("../providers/openai-compat.js");
 
   const repoRoot = resolve(new URL("../../", import.meta.url).pathname);
 
@@ -72,7 +75,7 @@ async function main() {
     cols: process.stdout.columns ?? 80,
     rows: process.stdout.rows ?? 24,
   });
-  const HINT = "enter send · ↑↓ history · pgup/pgdn scroll · ^C/^D quit · /help";
+  const HINT = "enter send · ↑↓ history · pgup/pgdn scroll · ?/provider providers · ^C/^D quit";
   // D4: mutables — SIGWINCH recomputes the layout, paint()/chunkPaint read
   // the live value instead of a stale const.
   let viewportRows = Math.max(3, screen.rows - 6); // status(1) + box(3) + hint(1) + spare(1)
@@ -91,11 +94,227 @@ async function main() {
     },
   });
 
+  // --- provider-admin §3: registry + panel ------------------------------------
+  const providersFile = resolve(repoRoot, "providers.config.json");
+  let discoveredRows = [
+    ...registry.listEnvProviders(process.env),
+    ...(await registry.loadProfiles(providersFile, { warn: (m) => process.stderr.write(`${m}\n`) })),
+  ];
+  // no-default-provider A2: FIRST user-configured profile when any exist; echo
+  // otherwise. The harness NEVER probes or silently selects a network provider.
+  const tuiProfiles = discoveredRows.filter((r) => r.source === "tui" || r.source === "env");
+  const defaultRow = await registry.defaultProviderFor(process.env, { profiles: tuiProfiles });
+  let activeStartupId = defaultRow ? defaultRow.id : "echo";
+  const panel = createProviderPanel({ providers: discoveredRows, activeId: activeStartupId });
+  let panelMode = "off"; // off | panel | form — composer is disabled in both
+  let formField = null; // provider-admin: current add-form field
+
+  function providerById(id) {
+    if (id === "echo") return echo;
+    const row = discoveredRows.find((r) => r.id === id);
+    if (!row) return null;
+    try {
+      return registry.buildFromEnv({ ...row, model: row.model ?? "default" }, process.env);
+    } catch (err) {
+      appendRows([`${style.red}provider ${id} unusable: ${err.message}${style.reset}`]);
+      return null;
+    }
+  }
+
+  async function persistProfiles() {
+    try {
+      await registry.saveProfiles(providersFile, discoveredRows.filter((r) => r.source === "tui"));
+    } catch (err) {
+      appendRows([`${style.red}providers.config.json write failed: ${err.message}${style.reset}`]);
+    }
+  }
+
+  function closePanelMode() {
+    panelMode = "off";
+    panel.closePanel();
+    composer.clear();
+    paint();
+  }
+
+  function paintPanel() {
+    if (!screen.isActive) return;
+    const out = [];
+    out.push(ansi.saveCaret + ansi.clearEntireLine + statusLine());
+    const rows = panel.paintRows();
+    rows.forEach((r, i) => {
+      const sel = r.selected ? `${style.bold}›${style.reset}` : " ";
+      const act = r.active ? `${style.green}●${style.reset}` : " ";
+      const src = r.source === "builtin"
+        ? ""
+        : ` ${style.dim}[${r.source}]${style.reset}`;
+      const hint = r.hint ? ` ${style.dim}${r.hint}${style.reset}` : "";
+      out.push(ansi.moveTo(1, 2 + i) + ansi.clearLineRight +
+        `${sel}${act} ${r.id} ${style.dim}${r.model}${style.reset}${src}${hint}`);
+    });
+    const footRow = 2 + rows.length + 1;
+    if (formField) {
+      const head = panel.editingId ? "edit provider" : "add provider";
+      const prompt = panel.editingId
+        ? `${formField === "id" ? `id (locked: ${panel.editingId})` : formField}`
+        : formField;
+      const shown = formField === "id" && panel.editingId ? "" : `: ${composer.text}`;
+      out.push(ansi.moveTo(1, footRow) + ansi.clearLineRight +
+        `${style.yellow}${head} — ${prompt}${shown}${style.reset}` +
+        (panel.formError ? ` ${style.red}${panel.formError}${style.reset}` : ""));
+    } else {
+      out.push(ansi.moveTo(1, footRow) + ansi.clearLineRight + style.dim + "  " +
+        (panel.noticeMessage ?? PANEL_FOOTER_TEXT()) + style.reset);
+    }
+    // park the caret inside the composer slot (form input echoes there)
+    const v = composer.view();
+    out.push(ansi.moveTo(3 + v.caretCol, panelMode === "form" ? footRow : 2 + viewportRows + 1));
+    screen.emit(out.join(""));
+  }
+
+  function PANEL_FOOTER_TEXT() {
+    return "enter=switch · a=add · e=edit · d=remove(tui only) · esc=close";
+  }
+
+  async function handlePanelToken(tok) {
+    if (panelMode === "form") {
+      // form input flows through the COMPOSER; submit on Enter per field.
+      if (tok === "\r" || tok === "\n") {
+        const value = composer.text;
+        const res = panel.formSubmit(value);
+        if (res.action === "submit") {
+          await onProfileSubmitted(res.profile);
+          return;
+        }
+        if (res.action === "edit") {
+          await onProfileEdited(res.profile);
+          return;
+        }
+        if (res.action === "none" && res.error) {
+          composer.clear(); // stay on the same field, show the error
+          paintPanel();
+          return;
+        }
+        formField = panel.formField; // advanced
+        composer.clear();
+        paintPanel();
+        return;
+      }
+      // any other key: composer edits the field text (the LOCKED id field in
+      // edit mode ignores input at emit time — typing here is cosmetic only;
+      // clear on advance keeps the prompt honest).
+      composer.key(tok);
+      paintPanel();
+      return;
+    }
+    const res = panel.key(tok);
+    switch (res.action) {
+      case "close":
+        closePanelMode();
+        return;
+      case "switch":
+        await onSwitchRequested(res.profile);
+        return;
+      case "removed":
+        await onProfileRemoved(res.profile, res.wasActive);
+        return;
+      case "form":
+        panelMode = "form";
+        formField = panel.formField;
+        if (panel.editingId) {
+          // edit mode: id locked — start the composer EMPTY on the id field
+          composer.clear();
+          paintPanel();
+          return;
+        }
+        composer.clear();
+        paintPanel();
+        return;
+      default:
+        paintPanel();
+    }
+  }
+
+  async function onSwitchRequested(profile) {
+    const p = providerById(profile.id);
+    if (!p) return; // error row already appended
+    const ok = await loop.setProvider(p);
+    panel.setActive(profile.id);
+    if (ok) appendRows([`provider switched → ${profile.id}`]);
+    closePanelMode();
+  }
+
+  async function onProfileRemoved(profile, wasActive) {
+    discoveredRows = discoveredRows.filter((r) => r.id !== profile.id);
+    panel.setProviders(discoveredRows);
+    await persistProfiles();
+    if (wasActive) {
+      await loop.setProvider(echo);
+      panel.setActive("echo");
+      appendRows([`provider ${profile.id} removed; fell back to echo`]);
+    } else {
+      appendRows([`provider ${profile.id} removed`]);
+    }
+    closePanelMode();
+  }
+
+  async function onProfileSubmitted(profile) {
+    discoveredRows = [...discoveredRows.filter((r) => r.id !== profile.id), profile];
+    panel.setProviders(discoveredRows);
+    await persistProfiles();
+    const p = providerById(profile.id);
+    if (!p) {
+      appendRows([`${style.red}provider ${profile.id} failed to build${style.reset}`]);
+      closePanelMode();
+      return;
+    }
+    await loop.setProvider(p);
+    panel.setActive(profile.id);
+    appendRows([`provider added + active → ${profile.id} (${profile.model})`]);
+    closePanelMode();
+  }
+
+  /** provider-edit §3: an edited profile persists via updateProfile, then the
+   *  ACTIVE provider is rebuilt and re-set (a model-only change emits the
+   *  switch event with from/to = same id, model = new — spec-acceptable);
+   *  a non-active edit just saves and notices. */
+  async function onProfileEdited(profile) {
+    try {
+      const row = await registry.updateProfile(providersFile, profile.id, {
+        baseUrl: profile.baseUrl,
+        model: profile.model,
+        ...(profile.apiKeyEnv ? { apiKeyEnv: profile.apiKeyEnv } : {}),
+      });
+      if (row === null) {
+        appendRows([`${style.red}provider ${profile.id} not found in profiles${style.reset}`]);
+        closePanelMode();
+        return;
+      }
+      discoveredRows = [...discoveredRows.filter((r) => r.id !== profile.id), row];
+      panel.setProviders(discoveredRows);
+    } catch (err) {
+      appendRows([`${style.red}providers.config.json update failed: ${err.message}${style.reset}`]);
+      closePanelMode();
+      return;
+    }
+    if (panel.activeId === profile.id) {
+      const p = providerById(profile.id);
+      if (p) {
+        await loop.setProvider(p); // same id, maybe new model — spec §2 path
+        appendRows([`provider updated + active → ${profile.id} (${profile.model})`]);
+      }
+    } else {
+      appendRows([`saved: ${profile.id}`]);
+    }
+    closePanelMode();
+  }
+
   // --- helpers ---------------------------------------------------------------
   function statusLine() {
     const t = loop ? `${loop.state.totalInput}/${loop.state.totalOutput}` : "0/0";
     const gate = askHandler ? `${style.yellow}ASK PENDING${style.reset}` : "open";
-    return `${style.bold}${DISPLAY_NAME}${style.reset} ${style.dim}${sessionId} · echo/echo · tokens ${t}${style.reset} · gate ${gate}`;
+    // provider-admin §3: live provider/model from loop state (updated on switch events)
+    const pv = loop ? `${loop.state.provider.id}/${loop.state.provider.model ?? "default"}` : "echo/echo";
+    return `${style.bold}${DISPLAY_NAME}${style.reset} ${style.dim}${sessionId} · ${pv} · tokens ${t}${style.reset} · gate ${gate}`;
   }
 
   function appendRows(rows) {
@@ -173,6 +392,14 @@ async function main() {
       paint();
       return;
     }
+    // provider panel mode (provider-admin §3): D1-safe tokens, one at a time
+    if (panelMode !== "off") {
+      for (const tok of splitKeys(chunk)) {
+        if (panelMode === "off") break; // close/switch may have exited mid-chunk
+        void handlePanelToken(tok);
+      }
+      return;
+    }
     // D6/D8: one shared tokenizer — whole escape tokens, printable insert
     // runs, per-newline submits in order (paste works); an unrecognized
     // escape drops the rest of the chunk (never composer input).
@@ -181,6 +408,12 @@ async function main() {
   });
 
   function handleKey(seq) {
+    // provider-admin §3: "?" + Enter on an EMPTY composer opens the panel
+    if (seq === "?" && composer.text.length === 0) {
+      composer.key("?"); // echo the char; the submit hook opens the panel
+      paint();
+      return;
+    }
     const r = composer.key(seq);
     switch (r.action) {
       case "send":
@@ -207,6 +440,14 @@ async function main() {
 
   async function handleSubmit(text) {
     viewport.pinToBottom();
+    // provider-admin §3: "?" alone (no command, no other chars) opens the panel
+    if (text.trim() === "?") {
+      composer.clear();
+      panel.openPanel();
+      panelMode = "panel";
+      paintPanel();
+      return;
+    }
     const parsed = parseSubmission(text);
     if (parsed.command) {
       switch (parsed.command) {
@@ -214,6 +455,12 @@ async function main() {
         case "/exit":
           await quit(0);
           return;
+        case "/provider": {
+          panel.openPanel();
+          panelMode = "panel";
+          paintPanel();
+          return;
+        }
         case "/policy": {
           const rows = policy.rules.map(
             (r) => `  ${r.id}: ${r.effect} ${JSON.stringify(r.match)}`,
@@ -252,7 +499,7 @@ async function main() {
           appendRows([`canonical sha256: ${log.canonicalSha256()}`]);
           return;
         case "/help":
-          appendRows(["commands: /policy /resume [seq] /compact /replay /quit"]);
+          appendRows(["commands: /policy /resume [seq] /compact /replay /provider ?"]);
           return;
         default:
           appendRows([`unknown command: ${parsed.command}`]);
@@ -303,8 +550,12 @@ async function main() {
 
   // --- loop wiring: EXACTLY cli.js chat()'s shape (echo default) ------------
   const askResolver = ask.resolver; // SAME contract as the REPL askResolver
+  // no-default-provider A2: startup provider = FIRST user-configured profile, echo otherwise.
+  const startupProvider = defaultRow
+    ? providerById(defaultRow.id) ?? echo
+    : echo;
   const loop = createLoop({
-    provider: echo,
+    provider: startupProvider,
     tools: createRegistry(),
     policy,
     log,
@@ -334,6 +585,12 @@ async function main() {
     // If the loop-side race/timeout settles an ask before a key did, free the
     // keymap so the composer re-enables (banner row still renders below).
     if (ev.type === "policy.ask.resolved" && askHandler) ask.abortPending();
+    // provider-admin §3: a switch event repaints the status bar (live
+    // provider/model come from loop state; the dim row lands in the viewport)
+    if (ev.type === "session.provider.switch") {
+      appendRows(R.renderEvent(ev));
+      return;
+    }
     // D3: commit the completed assistant reply to the viewport BEFORE
     // clearing liveText — scrollback keeps the answer.
     if (ev.type === "turn.provider.response" && liveText !== "") {
@@ -368,8 +625,11 @@ async function main() {
   // --- go --------------------------------------------------------------------
   screen.enter();
   appendRows([
-    `${DISPLAY_NAME} ${HARNESS_VERSION} — echo provider, log: ${logPath}`,
-    "commands: /policy /resume [seq] /compact /replay /quit",
+    `${DISPLAY_NAME} ${HARNESS_VERSION} — ${startupProvider.id} provider, log: ${logPath}`,
+    defaultRow
+      ? `default provider: ${defaultRow.id}/${defaultRow.model ?? "?"} (from providers.config.json|env)`
+      : "no provider configured — using echo (offline); add one via the ? panel or HARNESS_PROVIDER_<ID>_BASE_URL env vars",
+    "commands: /policy /resume [seq] /compact /replay /provider /quit — ? opens the provider panel",
   ]);
   paint();
 }

@@ -158,6 +158,12 @@ export function renderBranch(ev) {
   return dim(`branch from seq ${d.from_seq ?? "?"} → base ${d.new_base_seq ?? "?"}`);
 }
 
+/** provider-admin §4: dedicated switch row (was dim fallback until now). */
+export function renderProviderSwitch(ev) {
+  const d = ev?.data ?? {};
+  return dim(`provider ${d.from ?? "?"} → ${d.to ?? "?"} (model ${d.model ?? "?"})`);
+}
+
 export function renderProviderMeta(ev) {
   const d = ev?.data ?? {};
   if (ev.type === "turn.provider.request") {
@@ -189,6 +195,8 @@ export function renderEvent(ev) {
       return [renderError(ev)];
     case "session.branch":
       return [renderBranch(ev)];
+    case "session.provider.switch":
+      return [renderProviderSwitch(ev)];
     case "turn.start":
       return [renderUser(ev.data?.input)];
     case "turn.provider.request":
@@ -249,6 +257,7 @@ export default {
   renderPlugin,
   renderUsage,
   renderBranch,
+  renderProviderSwitch,
   renderProviderMeta,
   renderAskBanner,
   renderEvent,

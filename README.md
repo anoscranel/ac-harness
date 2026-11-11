@@ -72,6 +72,12 @@ The REPL's echo provider is deterministic and network-free. A tool call is
 proposed by typing `tool:<name> <json-args>`, e.g.
 `tool:read {"path":"README.md"}`.
 
+The TUI's provider panel (`?` or `/provider`) adds, removes, and switches
+providers at runtime; added profiles persist in the per-user local
+`providers.config.json` (baseUrl + model plain; api keys referenced by env
+var NAME only — a value is never stored). The loop swaps providers at turn
+boundaries only, emitting `session.provider.switch`.
+
 Plugins: the REPL loads `plugins/` and the per-user local
 `plugins.config.json` — both anchored on the repository root, so launching
 from a foreign cwd loads the same plugins (the config file is gitignored and

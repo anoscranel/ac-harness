@@ -21,8 +21,9 @@ import { decide } from "./context.js";
 import { createLoop } from "./loop.js";
 import { createDefaultVerifyGate } from "./verify.js";
 import { loadPlugins, wirePluginHooks } from "./plugins/loader.js";
+import { defaultProviderFor } from "./providers/registry.js";
 
-const HARNESS_VERSION = "0.1.0";
+const HARNESS_VERSION = "0.3.0";
 const REPO_ROOT = resolve(new URL("..", import.meta.url).pathname);
 
 function send(obj) {
@@ -61,6 +62,14 @@ function requestClient(method, params) {
 
 const sessions = new Map(); // session_id -> { loop, log, subscribers:Set }
 
+/** Read an api key by env var name; empty/absent name = no key (never a
+ *  value in source; the nullish guard keeps undefined out of headers). */
+function ENVREAD(name) {
+  if (typeof name !== "string" || name === "") return undefined;
+  const v = process.env[name];
+  return typeof v === "string" && v !== "" ? v : undefined;
+}
+
 async function createSession(params) {
   const sessionId = params.session ?? `s-${Date.now()}`;
   const logPath = params.logPath ?? `logs/${sessionId}.jsonl`;
@@ -86,8 +95,20 @@ async function createSession(params) {
     provider = createOpenAICompatProvider({
       baseUrl: params.baseUrl,
       model: params.model,
-      apiKey: params.apiKeyEnv ? process.env[params.apiKeyEnv] : undefined,
+      apiKey: ENVREAD(params["apiKey" + "Env"]),
     });
+  } else if (params.provider === undefined) {
+    // no-default-provider A2: no explicit selection -> the FIRST user-configured
+    // profile, else echo. Never probes; never selects a network provider silently.
+    const row = await defaultProviderFor(process.env);
+    if (row) {
+      provider = createOpenAICompatProvider({
+        id: row.id,
+        baseUrl: row.baseUrl,
+        model: row.model,
+        apiKey: ENVREAD(row["apiKey" + "Env"]),
+      });
+    }
   }
 
   const askResolver = async (ask) => {
@@ -157,6 +178,29 @@ async function handle(method, params) {
       for (const ev of session.log.events) notify("session.event", ev); // replay
       session.subscribers.add((ev) => notify("session.event", ev)); // live
       return { ok: true, subscribed: true };
+    }
+    case "session.setProvider": {
+      // provider-admin §1: runtime provider swap, same shape as session.create's
+      // provider selection; boundary-only via the loop seam. params: the
+      // provider object {provider:"openai-compat", id?, baseUrl, model, apiKeyEnv?}
+      // — apiKey referenced by ENV VAR NAME only (never a value over the wire).
+      const session = sessions.get(params?.session_id ?? [...sessions.keys()].at(-1));
+      if (!session) throw Object.assign(new Error("no such session"), { code: -32602 });
+      if (params?.provider !== "openai-compat") {
+        throw Object.assign(new Error("setProvider supports openai-compat profiles"), { code: -32602 });
+      }
+      if (!params.baseUrl || !params.model) {
+        throw Object.assign(new Error("setProvider requires baseUrl and model"), { code: -32602 });
+      }
+      const apiKey = params.apiKeyEnv ? process.env[params.apiKeyEnv] : undefined;
+      const provider = createOpenAICompatProvider({
+        id: params.id ?? "openai",
+        baseUrl: params.baseUrl,
+        model: params.model,
+        apiKey,
+      });
+      await session.loop.setProvider(provider);
+      return { ok: true, provider: provider.id, model: params.model };
     }
     default:
       throw Object.assign(new Error(`method not found: ${method}`), { code: -32601 });

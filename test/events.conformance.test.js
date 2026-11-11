@@ -110,3 +110,31 @@ test("buildEvent rejects unknown types and actors", () => {
   assert.throws(() => buildEvent("nope", "harness", {}), /unknown event type/);
   assert.throws(() => buildEvent("turn.start", "nobody", {}), /unknown actor/);
 });
+
+test("session.provider.switch: emitter accepts the type and canonical key order is {from,to,model}", async () => {
+  // provider-admin §4: the new type must build through events.js and its
+  // data key order must be canonical in the emitted envelope.
+  const built = buildEvent("session.provider.switch", "harness", {
+    model: "m-x",
+    to: "openai",
+    from: "echo",
+  });
+  assert.equal(built.type, "session.provider.switch");
+  assert.deepEqual(Object.keys(built.data), ["from", "to", "model"]);
+
+  const dir = await mkdtemp(join(tmpdir(), "harness-switch-"));
+  try {
+    const log = await EventLog.open(join(dir, "events.jsonl"));
+    await log.appendEvent("session.provider.switch", "harness", {
+      from: "echo",
+      to: "openai",
+      model: "gpt-x",
+    });
+    const [ev] = await readAll(join(dir, "events.jsonl"));
+    assert.equal(ev.type, "session.provider.switch");
+    // emitted key order IS the canonical order — replay sha stability relies on it
+    assert.equal(JSON.stringify(ev.data), '{"from":"echo","to":"openai","model":"gpt-x"}');
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});

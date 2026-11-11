@@ -4,4 +4,7 @@ logs/
 !fixtures/events.v1.jsonl
 # Per-user local plugin config (may hold absolute allowed_roots) — never commit.
 plugins.config.json
+# Per-user local provider profiles (baseUrl + model plain, keys referenced by
+# env var NAME only — provider-admin §2) — never commit.
+providers.config.json
 node_modules/

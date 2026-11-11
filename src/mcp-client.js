@@ -64,7 +64,7 @@ export class McpClient {
     const init = await client.#request("initialize", {
       protocolVersion,
       capabilities: {},
-      clientInfo: { name: "agent-harness", version: "0.1.0" },
+      clientInfo: { name: "ac-harness", version: "0.2.0" },
     });
     client.serverInfo = init?.serverInfo ?? null;
     client.#notify("notifications/initialized", {});
