@@ -187,6 +187,31 @@ store), session/prompt (streams `session/update` notifications with
 Prompts run through a real loop with the same policy engine; `ask` denies
 (the headless deny-and-continue posture). No diff or terminal surfaces.
 
+## Operator surfaces (v0.8.0)
+
+Four commands over capabilities that already existed — no new mechanisms:
+
+- `ac-harness checkpoint list` — undo, finally: every `write`/`edit` snapshots
+  first; this lists them (newest first). `checkpoint show <seq>` adds the
+  diff against the previous snapshot; `checkpoint restore <seq>` prints what
+  it would overwrite and REFUSES without `--yes` (`--prune` — deleting files
+  created after the snapshot — needs `--yes` as well);
+  `checkpoint prune --keep N` bounds the store.
+  `ac-harness checkpoint restore 3 --yes`
+- `ac-harness verify <log>` — is this log intact? Prints the event count,
+  the canonical sha256, a torn-tail state line, and exits non-zero on
+  `--expect <sha>` mismatch. Read-only, always.
+  `ac-harness verify logs/run.jsonl --expect <sha>`
+- `ac-harness stats <log>` — now cost-honest: `cost: n/a (no pricing table
+  configured — token counts only)` by default; if the active provider profile
+  carries `pricing {input_per_mtok, output_per_mtok}`, the money is computed
+  and printed WITH the unit and the profile as its source. No pricing table
+  ships in core.
+- `ac-harness doctor` — six checks (node ≥ 24, `rg`, log dir writable,
+  provider or the explicit echo-offline state, plugins manifests, `git`),
+  each ok/warn/fail with a remediation line; exits non-zero only on fail.
+  `ac-harness doctor`
+
 ## Zero-dependency statement
 
 **Preflight, honestly:** the actual minimum is **Node >= 24** (the code uses

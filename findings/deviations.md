@@ -1379,3 +1379,62 @@ Applied MUST-FIX (F1, F9, F19), the SHOULD-FIX list, and the D items from
 - Determinism: fresh echo run + replay, run sha == replay sha =
   `594309af0d879d658946be24a74a433958cb114d8a64d6b2bf1d2fa893b07e15`.
 - Log residue 0. No push.
+
+## v0.8.0 "Surfaces" (2026-11-13)
+
+161. **S1 checkpoint.** src/checkpoint-cli.js projects the existing store
+    (zero mechanism). list (newest first), show (manifest summary + the
+    store's own diff against the previous snapshot), restore (the
+    destructive-contract: prints "would OVERWRITE N file(s)" and exits 2
+    without --yes; --prune needs --yes as well AND its refusal names the
+    deletion), prune --keep N. Debug residue from the build: the first test
+    run deleted AC_CHECKPOINT_ROOT BEFORE calling the command — the command
+    resolved DEFAULT_ROOT (empty) and "newest label listed" failed. Fix was
+    test-side ordering (the env var stays set for the whole test); no
+    product change.
+162. **S2 verify.** src/verify-cli.js (read-only, always). events N,
+    canonical sha256, torn_tail as a state with its remediation pair, --expect
+    with exit 1 on mismatch. Verified with BOTH a healthy log and a
+    deliberately torn one: a torn tail does NOT change the canonical sha
+    (torn lines are skipped by the recovery) — so torn_tail:yes still exits 0
+    UNLESS --expect was aimed at a different healthy log. That nuance is
+    the test's assertion, not an accident.
+163. **S3 cost honesty.** computeCostFromProfile in stats.js: money ONLY
+    when the active profile carries pricing {input_per_mtok,
+    output_per_mtok}; the CLI passes the first configured profile (env
+    discovery — no profiles, no money). UNIT DECISION (the card names the
+    field but not the unit): micro-USD per Mtok, matching loop's
+    total_cost_micro_usd discipline (integers only, never floats) — pinned
+    by the test arithmetic (250k tokens at $3.00/Mtok = $0.75 → 750_000
+    micro_usd... i.e. input_per_mtok is the MICRO-USD rate; the money line
+    renders $0.7500-style via /1e6). Default line: `cost: n/a (no pricing
+    table configured — token counts only)` — zero never printed as money.
+164. **S4 doctor.** Six checks exactly (node, rg, log dir, provider,
+    plugins, git); a check that cannot fail anywhere was not included.
+    node goes through the AC_FAKE_NODE_VERSION env seam — DC5 honored
+    without touching the runtime (the test fakes v18 → FAIL + remediation;
+    v26 → ok). Provider check reports the explicit "using echo (offline)"
+    state as OK-with-remediation (offline is a valid state, not a failure).
+    First draft printed "node: node v18.19.0" (double prefix) — caught by
+    the test, fixed to the bare version string.
+165. **README.** One tight section: the four commands, one example each
+    (the card's S5), each stating the behavior actually tested — including
+    the refusal flags and the read-only guarantee.
+166. **The doctor "ok" padding mismatch (ok␣␣vs ok␣␣␣␣)** — the printer
+    pads ok to align with warn/FAIL; the first test regexes assumed 2 spaces.
+    Whitespace-flexible regexes now; the printer is unchanged (alignment is
+    right).
+
+**v0.8.0 gate evidence (2026-11-13, node v24.18.0):**
+- `node scripts/check.mjs` → all files OK.
+- bare `node --test` → **339 tests, 338 pass, 0 fail, 1 platform skip**
+  (324 baseline + 15 new: 8 v080-surfaces + …5 delegate-hardening-class
+  + 2 cron additions raced with the sync — 339 total counted first-hand
+  across 5 consecutive full-suite runs: 339/338/0/1 ×5, zero transient).
+- `sh bench/ship-gate.sh` → PASS (DC6, name-guard, zero-dep).
+- Determinism: run sha == replay sha =
+  `5a3ae6d82922f837188348b78f5973a47bd3b628dac0ebd33d7fa54870e3f37c`.
+- Manual smokes (real output): checkpoint list on an empty store; verify on
+  a fresh log (events: 2, sha printed, torn_tail: no); stats with the
+  explicit "cost: n/a (no pricing table configured — token counts only)"
+  line; doctor → 6×ok + "doctor: usable". Log residue 0. No push.

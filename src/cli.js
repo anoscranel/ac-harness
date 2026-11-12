@@ -602,10 +602,21 @@ async function main() {
       process.exit(2);
     }
     const { readAll } = await import("./events.js");
-    const { buildReport, formatReport } = await import("./stats.js");
+    const { buildReport, formatReport, computeCostFromProfile } = await import("./stats.js");
+    const { listEnvProviders } = await import("./providers/registry.js");
     const events = await readAll(resolve(rest[0]));
     const report = buildReport(events);
-    process.stdout.write(formatReport(report, { logPath: resolve(rest[0]) }) + "\n");
+    // v0.8.0 S3: money ONLY from a provider profile's own pricing field;
+    // no profile (or no pricing field) → the honest n/a line.
+    let costProfile = null;
+    try {
+      const profiles = listEnvProviders(process.env);
+      costProfile = profiles[0] ?? null;
+    } catch {
+      costProfile = null;
+    }
+    const cost = costProfile ? computeCostFromProfile(report, costProfile) : null;
+    process.stdout.write(formatReport(report, { logPath: resolve(rest[0]), cost }) + "\n");
     return;
   }
   if (cmd === undefined) {

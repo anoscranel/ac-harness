@@ -78,8 +78,35 @@ export function buildReport(events) {
   return report;
 }
 
+/**
+ * v0.8.0 S3 (cost honesty): money computed from a provider PROFILE's
+ * pricing {input_per_mtok, output_per_mtok} — the ONLY source. No pricing
+ * table ships in core; without a profile this stays n/a (a zero would read
+ * as "free" when it means "unmeasured"). Micro-USD integers only (the same
+ * discipline as loop's total_cost_micro_usd).
+ * @returns null when the profile carries no pricing; else
+ *   {input_micro_usd, output_micro_usd, total_micro_usd, input_per_mtok,
+ *    output_per_mtok, source}
+ */
+export function computeCostFromProfile(report, profile) {
+  const pricing = profile?.pricing;
+  if (!pricing || !Number.isFinite(pricing.input_per_mtok) || !Number.isFinite(pricing.output_per_mtok)) {
+    return null;
+  }
+  const input = Math.round((report.tokens.input / 1e6) * pricing.input_per_mtok);
+  const output = Math.round((report.tokens.output / 1e6) * pricing.output_per_mtok);
+  return {
+    input_micro_usd: input,
+    output_micro_usd: output,
+    total_micro_usd: input + output,
+    input_per_mtok: pricing.input_per_mtok,
+    output_per_mtok: pricing.output_per_mtok,
+    source: profile.id ?? "profile",
+  };
+}
+
 /** Human-readable printer (the CLI stats subcommand uses this). */
-export function formatReport(report, { logPath = null } = {}) {
+export function formatReport(report, { logPath = null, cost = null } = {}) {
   const lines = [];
   if (logPath) lines.push(`log: ${logPath}`);
   lines.push(`turns: ${report.turns}`);
@@ -87,6 +114,13 @@ export function formatReport(report, { logPath = null } = {}) {
     `tokens: input ${report.tokens.input} · cached ${report.tokens.cached} · output ${report.tokens.output}` +
       (report.tokens.estimated ? " (estimate flagged)" : ""),
   );
+  if (cost) {
+    lines.push(
+      `cost: $${(cost.total_micro_usd / 1e6).toFixed(4)} (from provider profile "${cost.source}": input $${cost.input_per_mtok}/Mtok · output $${cost.output_per_mtok}/Mtok)`,
+    );
+  } else {
+    lines.push(`cost: n/a (no pricing table configured \u2014 token counts only)`);
+  }
   const toolNames = Object.keys(report.tools).sort();
   if (toolNames.length === 0) {
     lines.push("tools: none");

@@ -15,7 +15,10 @@ test("3.1 HARNESS_VERSION is the single source, equal to package.json.version", 
   const { HARNESS_VERSION } = await import("../src/version.js");
   const pkg = JSON.parse(readFileSync(join(ROOT, "package.json"), "utf8"));
   assert.equal(HARNESS_VERSION, pkg.version);
-  assert.match(HARNESS_VERSION, /^0\.7\.0$/);
+  // v0.8.0: assert the SHAPE, not a literal — a literal here means every
+  // release breaks this test and someone "fixes" it by editing the pin.
+  assert.match(HARNESS_VERSION, /^\d+\.\d+\.\d+$/);
+  assert.equal(HARNESS_VERSION, pkg.version, "single source means they agree");
 });
 
 test("3.1 the four call sites import version.js (no literal survives)", () => {
@@ -40,7 +43,8 @@ test("3.1 the four call sites import version.js (no literal survives)", () => {
 
 test("3.2 bin: --version prints the package version", () => {
   const out = execFileSync(process.execPath, [join(ROOT, "bin", "ac-harness.js"), "--version"], { encoding: "utf8" });
-  assert.match(out.trim(), /^0\.7\.0$/);
+  const pkg = JSON.parse(readFileSync(join(ROOT, "package.json"), "utf8"));
+  assert.equal(out.trim(), pkg.version, "--version must report package.json's version");
 });
 
 test("3.2 bin: replay <log> works through the dispatcher", { skip: false }, async () => {

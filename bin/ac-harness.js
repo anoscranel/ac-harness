@@ -46,6 +46,25 @@ switch (cmd) {
   case "acp": // ship-3: the ACP agent side (separate process — one protocol per process)
     run("src/acp.js", []);
     break;
+  case "checkpoint": { // v0.8.0 S1: the undo surface over the existing store
+    // runs in-process (it prints lines + may exit non-zero on refusal)
+    const { checkpointCommand } = await import(join(root, "src", "checkpoint-cli.js"));
+    const r = await checkpointCommand(rest, { cwd: process.cwd(), stdout: process.stdout });
+    process.exit(r.exitCode);
+    break;
+  }
+  case "verify": { // v0.8.0 S2: read-only log verification
+    const { verifyCommand } = await import(join(root, "src", "verify-cli.js"));
+    const r = await verifyCommand(rest, { stdout: process.stdout });
+    process.exit(r.exitCode);
+    break;
+  }
+  case "doctor": { // v0.8.0 S4: six checks, ok/warn/fail, non-zero only on fail
+    const { doctorCommand } = await import(join(root, "src", "doctor-cli.js"));
+    const r = await doctorCommand({ stdout: process.stdout });
+    process.exit(r.exitCode);
+    break;
+  }
   case "stats": // v0.5.0 H6
     if (!rest[0]) {
       process.stderr.write("usage: ac-harness stats <log>\n");
