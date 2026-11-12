@@ -685,3 +685,141 @@ Applied MUST-FIX (F1, F9, F19), the SHOULD-FIX list, and the D items from
   `9cc5cf76080be7fa67fd9dcda84a3e2c17811c5b759a7bb235cf7f01b6822827` and
   `d103134128c13361854fe2332a8a6bc50f2d850f1f20ae325a590923c1569498` (each
   pair internally equal). Log residue removed.
+
+## v0.4.0 "Round Trip" (Ship 1 — protocol correctness, 2026-11-12)
+
+94. **Ship 1 red-first evidence.** test/provider-protocol.test.js written BEFORE
+    implementation: 7 tests, 5 RED. Failure texts (recorded per card 1.1):
+    - "assistant tool_calls emitted in the provider-native shape: content ''
+      !== content null"; ("tool_calls" key entirely absent from the wire);
+    - "assistant message stores tool_calls (1.3): actual undefined";
+    - "calls were proposed: actual false".
+    Green after: 7/7.
+95. **1.4 scope narrowed to the REAL dangling source.** In the shipped loop the
+    cap path never dangles organically: every iteration runs its calls BEFORE
+    the budget check, so at-cap transcripts have their last calls answered.
+    A dangling pair arises when runToolCall THROWS before pushing the tool
+    message (dead tool runner). The implemented closeDanglingToolCalls scans
+    the WHOLE transcript (any assistant tool_calls id without a matching tool
+    message), called from the cap block; Ship 2's finalizeTurn will reuse the
+    same helper on the error/abort paths. Test drives a genuine two-phase
+    scenario on ONE loop (per-loop state matters: first attempt used two
+    loops and the cap had nothing dangling in its own state).
+    Two test-side gotchas recorded: distinct ids per phase (a shared id gets
+    collaterally answered); a provider must return after its done-frame in
+    phase 1 (a second done-frame replaces `final`).
+96. **1.5 exposed a REAL pre-existing resume bug.** The resume path rebuilt
+    role:"tool" messages WITHOUT call_id — the pairing key was silently lost
+    on resume since the beginning (the 1.6 test caught it as "call-X still
+    paired post-compaction", debugged to a resume-time loss, not compaction).
+    Fix: resume restores call_id from the tool.result event data.
+97. **1.6 partner-solidarity applier.** applyCompactionToMessages marks
+    content per range as before, plus: pass 1 collects condemned indices;
+    pass 2 extends the set with PARTNERS (an assistant with tool_calls pulls
+    in its matching tool messages; a tool message pulls in its assistant);
+    compacted assistants drop their tool_calls (the text marker stands in) so
+    no half-pair survives. Probed: assistant+tool compact together; an
+    out-of-range partner joins the fate; surviving pairs stay paired.
+98. **turn.cap additive event** registered in events.js EVENT_TYPES + canonical
+    data order {turn, max_iterations, closed_calls}; fixture gained one
+    example line (seq 18) per the provider-switch precedent — the
+    conformance suite caught the missing fixture line itself (ship-gate red
+    before the line was appended).
+99. **Determinism note (Ship 1).** turn.provider.response gained the additive
+    tool_calls array (1.5 round-trip); the echo tool-call transcript now
+    records it — canonical replay covers the new key (orderData extras after
+    known keys), run sha == replay sha =
+    `d0da93b31bb8a70a08ee38761e438ea3c9d2545eb6d61f0dd6101028edd71e8f`.
+
+## v0.4.0 "Round Trip" — Ships 2 & 3 (2026-11-12)
+
+100. **Ship 2.1 — finalizeTurn shape.** ONE finally at runTurn's provider-endurance
+    boundary now performs all three finalize duties: closes dangling calls
+    (reusing Ship 1.4's helper with reason-specific文案), writes
+    turn.end {reason}, and clears in-flight state + queued provider swap.
+    Reason taxonomy: complete | cap | verify-denied | error | aborted (a
+    context-block verdict maps to "error" — an unhealthy exit, not a fifth
+    reason). New events turn.end {turn, reason, closed_calls} registered in
+    events.js; fixture gained example lines for both new types (conformance
+    caught the missing lines itself, twice).
+101. **THE LESSON THAT COST AN HOUR: try/finally bodies are separate lexical
+    blocks.** The first finalize implementation read try-body `let`s
+    (endReason, iterationsExhausted, turn, turnIndex, turnStartEv) directly
+    in the finally — ReferenceError even on the happy path. Proven in a
+    12-line miniature: a `let x` in the try body is `undefined`-to-the-
+    finally in ALL completion modes. Fixed with a function-scoped
+    finalizeCtx object mutated at every exit point and read ONLY by the
+    finally. (KB-worthy: the failure mode looks EXACTLY like stale-cache or
+    brace corruption — it is neither; it is JS lexical scoping.)
+102. **Ship 2.2 — torn-tail recovery.** readAll(path, {onTornTail}) skips
+    unparseable lines (never fatal), counts them, and reports {skipped_lines,
+    first_skipped_seq} up to EventLog.open, which logs ONE log.torn_tail
+    event. Two non-obvious behaviors found by probing: (a) a torn fragment
+    has NO trailing newline, so the report event would GLUE onto it and
+    become unparseable itself — open() seals the fragment with one appended
+    newline first (append-only preserved; the fragment bytes stay);
+    (b) the fragment lives forever in the file, so every reopen would
+    re-report the same tail — gated exactly-once per first_skipped_seq.
+103. **Ship 2.3 — SIGINT contract.** cli.js + tui/main.js: SIGINT mid-turn
+    → loop.abort() (turn.end reason aborted via finalize); idle → the
+    existing quit path; second SIGINT within 2s of a busy one = loud force
+    exit 130 (TUI goes through teardown — alt-screen never left dirty).
+    The spawned-child probe was abandoned in favor of an in-process
+    handler-listener probe: `process.kill(pid, SIGINT)` inside a
+    node:test batch is runner-dependent (the runner juggles signal
+    handlers); the contract under test — handler → abort → finalize
+    trail — is fully observable in-process. A real kill-flow remains
+    covered by manual/EPIPE paths.
+104. **Abort-race provider lesson (test-side).** A provider that registers
+    `signal.addEventListener("abort")` on an ALREADY-aborted signal never
+    fires (listeners on a settled signal are silently dead). The abort can
+    land before the provider call — the gated test providers now check
+    `signal.aborted` at entry, matching what the REAL providers do
+    (echo checks before each chunk; openai-compat passes signal to fetch
+    and checks between retries). The loop-level guarantee remains: abort
+    is honored at every provider/tool boundary that checks the signal.
+    ADDENDUM (batch-load evidence): the same dead-listener shape in
+    test/loop.switch.test.js's makeGatedProvider produced a 453s batch
+    hang (abort landed before the generator started; the gate never
+    released). Same fix applied there; 3x switch-standalone and 2x
+    ship-gate green after.
+105. **Ship 2 — 1.4-test interplay.** Ship 2.1 closes dangling pairs at
+    EVERY exit — so the 1.4 test's premise ("the pair stays dangling until
+    the cap turn") became historical: the error turn itself closes it now.
+    The 1.4 test was updated to assert the NEW contract (error-turn close +
+    reason error + closed_calls), and the cap-turn assertions now pin
+    turn.cap + reason cap with closed_calls reflecting nothing new. The
+    redundant finalize-scan in the cap BLOCK (done first in 1.4, then
+    again by the shared finally) was left in place deliberately: the cap
+    block needs closed ids for turn.cap BEFORE the finally runs — a double
+    scan is id-free (the second pass finds the pair already closed).
+    Verified: no double-close (the error+cap sequence logs each id once).
+106. **Ship 3.1 — single version source.** src/version.js reads
+    package.json at import (readFileSync + createRequire context); the
+    four literals now import it; loop.js's DEFAULTS.harness_version also
+    follows it (was a stale "0.1.0" — a latent bug the card's test for
+    call-site-import surfaced). Version 0.4.0 everywhere.
+107. **Ship 3.2 — bin.** bin/ac-harness.js dispatcher: `--version` (lazy
+    import so it works even with broken heavy modules), replay <log>,
+    server, chat, tui; DEFAULT = tui on TTY else the REPL (the TUI's
+    non-TTY advisory exit makes both safe). package.json gains "bin".
+    Verified: --version prints 0.4.0; replay through the dispatcher works
+    (sha printed); `chmod +x` set.
+108. **Ship 3.3 — README preflight honesty.** Replaced the Zero-dependency
+    section's stale claims: actual minimum Node >= 24; rg required for the
+    grep tool ONLY (degrades with a clear message when absent); no
+    install step beyond cloning.
+
+**v0.4.0 gate evidence (2026-11-12, node v24.18.0):**
+- `node scripts/check.mjs` → all files OK (after every ship).
+- bare `node --test` → **213/213, 0 fail** (194 baseline + 19 new: 7
+  provider-protocol, 7 turn-finalize, 5 version-bin... counting: 194 was
+  pre-Ship-1; Ship 1 added 7, Ship 2 added 7, Ship 3 added 5).
+- `sh bench/ship-gate.sh` → PASS at every ship gate (DC6, name-guard
+  -rin, zero-dep; ship 1 red-first evidence in deviation 94).
+- Determinism per ship (fresh echo run + replay, both shas equal):
+  Ship 1 `d0da93b31bb8a70a08ee38761e438ea3c9d2545eb6d61f0dd6101028edd71e8f`,
+  Ship 2 `db263585d549c86ceb4e91eb5891624fdc70b4295273c8e60eb41f70f66e5120`,
+  Ship 3 `db7cf4e6c6674369e1de350b6222eec41db97161b5bad37d38d455debffab5e8`.
+- `node bin/ac-harness.js --version` → 0.4.0.
+- Not pushed (per card): the desk verifies; theta decides on push.

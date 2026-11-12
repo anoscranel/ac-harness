@@ -114,9 +114,37 @@ export function createOpenAICompatProvider({
   async function* stream(request, { signal } = {}) {
     const body = {
       model,
+      // v0.4.0 Ship 1 / 1.2: the tools wire contract. An assistant message
+      // carrying tool_calls is emitted provider-native:
+      //   tool_calls: [{id, type:"function", function:{name, arguments: STRING}}]
+      // with content nulled when there is no text (content ?? null); a
+      // harness-stored args OBJECT is JSON.stringified, a stored string passes
+      // through; an EMPTY tool_calls array is never emitted; a role:"tool"
+      // message keeps its tool_call_id exactly as before.
       messages: request.messages.map((m) => {
         const out = { role: m.role, content: m.content };
         if (m.role === "tool" && m.call_id) out.tool_call_id = m.call_id;
+        if (Array.isArray(m.tool_calls) && m.tool_calls.length > 0) {
+          out.tool_calls = m.tool_calls.map((c) => {
+            // Accept BOTH stored shapes: the harness-internal {call_id, name, args}
+            // and provider-native {id, function:{name, arguments}}. Emitting an
+            // undefined name silently produces a protocol-invalid transcript.
+            const name = c.name ?? c.function?.name;
+            const rawArgs = c.args ?? c.function?.arguments;
+            if (typeof name !== "string" || name === "") {
+              throw new Error("tool_calls entry missing a function name");
+            }
+            return {
+              id: c.call_id ?? c.id,
+              type: "function",
+              function: {
+                name,
+                arguments: typeof rawArgs === "string" ? rawArgs : JSON.stringify(rawArgs ?? {}),
+              },
+            };
+          });
+          if (out.content === "" || out.content === undefined) out.content = null;
+        }
         return out;
       }),
       stream: true,

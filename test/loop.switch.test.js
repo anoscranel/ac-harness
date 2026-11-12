@@ -116,12 +116,22 @@ function makeGatedProvider(id, model) {
     model,
     released: false,
     async *stream(request, { signal } = {}) {
+      // abort-race safe (deviation 104): a listener on an ALREADY-aborted
+      // signal never fires — under batch load the abort can land before the
+      // generator starts; check aborted at entry like the real providers.
+      if (signal?.aborted) {
+        const e = new Error("aborted");
+        e.name = "AbortError";
+        throw e;
+      }
       const aborted = new Promise((_, rej) => {
-        signal?.addEventListener("abort", () => {
+        const fire = () => {
           const e = new Error("aborted");
           e.name = "AbortError";
           rej(e);
-        }, { once: true });
+        };
+        if (signal?.aborted) fire();
+        else signal?.addEventListener("abort", fire, { once: true });
       });
       await Promise.race([gate, aborted]);
       const text = `${id}: ${request.messages.at(-1)?.content ?? ""}`;

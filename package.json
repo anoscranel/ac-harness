@@ -1,6 +1,6 @@
 {
   "name": "agent-harness",
-  "version": "0.3.0",
+  "version": "0.4.0",
   "description": "Production open-source AI agent harness: event-sourced loop, tools, providers, policy, plugins, MCP. Zero npm dependencies.",
   "type": "module",
   "license": "Apache-2.0",
@@ -13,5 +13,8 @@
     "replay": "node src/cli.js replay",
     "chat": "node src/cli.js"
   },
-  "private": false
+  "private": false,
+  "bin": {
+    "ac-harness": "./bin/ac-harness.js"
+  }
 }

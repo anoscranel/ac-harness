@@ -8,6 +8,7 @@
 
 import { spawn } from "node:child_process";
 import { resolveAsk } from "./policy.js";
+import { HARNESS_VERSION } from "./version.js";
 
 const DEFAULT_PROTOCOL = "2025-03-26"; // widely deployed; 2026-07-28 is a breaking redesign (see README)
 const REQUEST_TIMEOUT_MS = 30_000;
@@ -64,7 +65,7 @@ export class McpClient {
     const init = await client.#request("initialize", {
       protocolVersion,
       capabilities: {},
-      clientInfo: { name: "ac-harness", version: "0.2.0" },
+      clientInfo: { name: "ac-harness", version: HARNESS_VERSION },
     });
     client.serverInfo = init?.serverInfo ?? null;
     client.#notify("notifications/initialized", {});

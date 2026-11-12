@@ -16,3 +16,6 @@
 {"seq":15,"ts":1771670400.030,"type":"compaction.applied","actor":"compaction","data":{"version":1,"ranges":[{"start":0,"end":2,"event_log_span":{"first":3,"last":7}}],"strategy":"summarise","freed_events":5}}
 {"seq":16,"ts":1771670400.031,"type":"session.end","actor":"harness","data":{"turns":1,"total_input_tokens":42,"total_output_tokens":10,"total_cost_micro_usd":0}}
 {"seq":17,"ts":1771670400.032,"type":"session.provider.switch","actor":"harness","data":{"from":"echo","to":"openai","model":"gpt-x"}}
+{"seq":18,"ts":1771670400.040,"type":"turn.cap","actor":"harness","data":{"turn":3,"max_iterations":8,"closed_calls":["call-x1"]}}
+{"seq":19,"ts":1771670400.041,"type":"turn.end","actor":"harness","data":{"turn":3,"reason":"complete","closed_calls":[]}}
+{"seq":20,"ts":1771670400.042,"type":"log.torn_tail","actor":"harness","data":{"skipped_lines":1,"first_skipped_seq":19}}

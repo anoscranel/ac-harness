@@ -30,6 +30,9 @@ export const EVENT_TYPES = Object.freeze([
   "session.branch",
   "session.provider.switch",
   "turn.start",
+  "turn.cap",
+  "turn.end",
+  "log.torn_tail",
   "turn.provider.request",
   "turn.provider.chunk",
   "turn.provider.response",
@@ -72,6 +75,9 @@ const DATA_KEY_ORDER = Object.freeze({
   "session.branch": ["from_seq", "new_base_seq"],
   "session.provider.switch": ["from", "to", "model"],
   "turn.start": ["turn", "input"],
+  "turn.cap": ["turn", "max_iterations", "closed_calls"],
+  "turn.end": ["turn", "reason", "closed_calls"],
+  "log.torn_tail": ["skipped_lines", "first_skipped_seq"],
   "turn.provider.request": ["provider", "model", "messages", "tools", "prefix_tokens", "prefix_cached"],
   "turn.provider.chunk": ["delta", "done"],
   "turn.provider.response": ["finish", "input_tokens", "cached_tokens", "output_tokens", "estimate", "truncated"],
@@ -154,12 +160,25 @@ export function sha256(input) {
 }
 
 /** Parse an NDJSON event log into an array of events. */
-export async function readAll(path) {
+export async function readAll(path, { onTornTail = null } = {}) {
   const raw = await readFile(path, "utf8");
   const events = [];
+  let skipped = 0;
+  let firstSkippedSeq = null;
   for (const line of raw.split("\n")) {
     if (line.trim() === "") continue;
-    events.push(JSON.parse(line));
+    try {
+      const ev = JSON.parse(line);
+      events.push(ev);
+    } catch {
+      // v0.4.0 2.2: a truncated tail (crash mid-append) must NOT brick
+      // startup. Skip + count; the file is NEVER truncated (append-only).
+      if (skipped === 0) firstSkippedSeq = events.length === 0 ? 0 : events[events.length - 1].seq + 1;
+      skipped += 1;
+    }
+  }
+  if (skipped > 0 && typeof onTornTail === "function") {
+    onTornTail({ skipped_lines: skipped, first_skipped_seq: firstSkippedSeq });
   }
   return events;
 }
@@ -229,11 +248,44 @@ export class EventLog extends EventEmitter {
   static async open(path) {
     const log = new EventLog(path);
     await mkdir(dirname(path), { recursive: true });
+    let torn = null;
     try {
-      log.events = await readAll(path);
+      log.events = await readAll(path, {
+        onTornTail: (info) => {
+          torn = info;
+        },
+      });
       log.seq = log.events.length === 0 ? 0 : log.events[log.events.length - 1].seq + 1;
     } catch (err) {
       if (err.code !== "ENOENT") throw err;
+    }
+    // v0.4.0 2.2: report the torn tail as an EVENT (observability surface),
+    // on open, only when lines were skipped. A torn fragment has no trailing
+    // newline, so the report must FIRST seal the fragment with one newline
+    // (append-only: the fragment bytes stay, never truncated) — otherwise
+    // the report would glue onto the torn line and become unparseable itself.
+    // A failed report is non-fatal: startup survives either way.
+    if (torn !== null) {
+      try {
+        // exactly-once per tail: skip if this tail was already reported
+        // (the torn fragment stays in the file forever — append-only — so
+        // every open would otherwise re-report the same tail).
+        const alreadyReported = log.events.some(
+          (e) => e.type === "log.torn_tail" && e.data.first_skipped_seq === torn.first_skipped_seq,
+        );
+        if (!alreadyReported) {
+          const raw = await readFile(path, "utf8").catch(() => "");
+          if (raw !== "" && !raw.endsWith("\n")) {
+            await appendFile(path, "\n", "utf8"); // seal the fragment (append-only)
+          }
+          await log.appendEvent("log.torn_tail", "harness", {
+            skipped_lines: torn.skipped_lines,
+            first_skipped_seq: torn.first_skipped_seq,
+          });
+        }
+      } catch {
+        /* the torn tail was already tolerated; a failed report is non-fatal */
+      }
     }
     return log;
   }

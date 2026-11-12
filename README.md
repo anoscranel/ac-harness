@@ -87,11 +87,15 @@ deliberate (a headless server's config arrives with the session request).
 
 ## Zero-dependency statement
 
-The npm dependency tree is EMPTY. There is no transpiler and no build step;
-type-check-lite is `node --check` plus `node --test`. The single external
-runtime dependency is the `ripgrep` binary (`rg`), spawned as a subprocess by
-the grep tool; the tool warns and fails gracefully when `rg` is absent, and
-the env preflight asserts `rg --version` and `node --version >= 24`.
+**Preflight, honestly:** the actual minimum is **Node >= 24** (the code uses
+globals and `node:*` APIs from that line). `ripgrep` (`rg`) is required
+**for the grep tool only** — without it the grep tool degrades with a clear
+error message; everything else runs. There is **no install step beyond
+cloning** the repository: zero npm dependencies, no transpiler, no build
+step. Type-check-lite is `node --check` plus `node --test`.
+
+The npm dependency tree of this package is EMPTY by design: every runtime
+import is a `node:*` builtin.
 
 ## Event log durability (CVE-class note)
 

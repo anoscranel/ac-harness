@@ -23,7 +23,7 @@ import { createDefaultVerifyGate } from "./verify.js";
 import { loadPlugins, wirePluginHooks } from "./plugins/loader.js";
 import { defaultProviderFor } from "./providers/registry.js";
 
-const HARNESS_VERSION = "0.3.0";
+import { HARNESS_VERSION } from "./version.js";
 const REPO_ROOT = resolve(new URL("..", import.meta.url).pathname);
 
 function send(obj) {

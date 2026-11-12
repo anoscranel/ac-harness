@@ -16,6 +16,7 @@ import { resolveAsk } from "./policy.js";
 import { sha256 } from "./events.js";
 import { decide as builtinDecide } from "./context.js";
 import { TokenCache, estimateTokens } from "./tokens.js";
+import { HARNESS_VERSION } from "./version.js";
 
 /** 6.2 (audit-a2): ONE shared compaction applier — run path and resume path
  *  call this same code, so replay mirrors apply byte-for-byte. Applies to
@@ -23,21 +24,64 @@ import { TokenCache, estimateTokens } from "./tokens.js";
  *  with the events-span placeholder, "drop" removes it with a dropped marker.
  *  Nothing outside the ranges is touched. */
 function applyCompactionToMessages(messages, ranges, strategy) {
+  // v0.4.0 1.6: compaction must not orphan tool_calls. Pass 1 marks content
+  // as before; pass 2 detects assistant tool_calls INSIDE a compacted range
+  // whose matching role:"tool" messages lie OUTSIDE it (or vice versa) and
+  // pulls those partners into the same fate, closing the pair either way.
+  const condemned = new Set();
   for (const r of ranges ?? []) {
-    for (let i = r.start; i < r.end; i++) {
-      const m = messages[i];
-      if (!m) continue;
-      const span = `${r.event_log_span.first}..${r.event_log_span.last}`;
-      m.content =
-        strategy === "drop"
-          ? `[dropped ${m.kind}; events ${span}]`
-          : `[compacted ${m.kind}; events ${span}]`;
+    for (let i = r.start; i < r.end; i++) condemned.add(i);
+  }
+  // find partner indices that must share the fate of their condemned partner
+  const extend = new Set();
+  for (const i of condemned) {
+    const m = messages[i];
+    if (!m) continue;
+    if (m.role === "assistant" && Array.isArray(m.tool_calls) && m.tool_calls.length > 0) {
+      for (const c of m.tool_calls) {
+        const id = c?.call_id ?? c?.id;
+        if (!id) continue;
+        for (let j = 0; j < messages.length; j++) {
+          if (condemned.has(j) || extend.has(j)) continue;
+          if (messages[j]?.role === "tool" && messages[j]?.call_id === id) extend.add(j);
+        }
+      }
+    }
+    if (m.role === "tool" && m.call_id) {
+      for (let j = 0; j < messages.length; j++) {
+        if (condemned.has(j) || extend.has(j)) continue;
+        const a = messages[j];
+        if (a?.role === "assistant" && Array.isArray(a.tool_calls) &&
+            a.tool_calls.some((c) => (c?.call_id ?? c?.id) === m.call_id)) {
+          extend.add(j);
+        }
+      }
+    }
+  }
+  const all = [...condemned, ...extend];
+  for (const i of all) {
+    const m = messages[i];
+    if (!m) continue;
+    const spanIdx = ranges?.find((r) => i >= r.start && i < r.end);
+    const span = spanIdx
+      ? `${spanIdx.event_log_span.first}..${spanIdx.event_log_span.last}`
+      : `${ranges?.[0]?.event_log_span.first ?? 0}..${ranges?.[0]?.event_log_span.last ?? 0}`;
+    m.content =
+      strategy === "drop"
+        ? `[dropped ${m.kind}; events ${span}]`
+        : `[compacted ${m.kind}; events ${span}]`;
+    // a compacted assistant with tool_calls drops its calls too — the TEXT
+    // marker stands in; a surviving tool_calls without its tool result (or
+    // vice versa) is the orphan defect 1.6 forbids, so partners always share
+    // the fate and compacted pairs serialize as inert text.
+    if (m.role === "assistant" && /compacted|dropped/.test(m.content ?? "")) {
+      delete m.tool_calls;
     }
   }
 }
 
 const DEFAULTS = {
-  harness_version: "0.1.0",
+  harness_version: HARNESS_VERSION, // v0.4.0 3.1: single-sourced
   session: "default",
   config_sha: "0".repeat(8),
   context_limit: 128_000,
@@ -317,15 +361,72 @@ export function createLoop({
    * turns, never while a stream, tool call, gate, or compaction decision is
    * still able to read state.provider.
    */
+  /**
+   * v0.4.0 1.4 (F-D1.1): close dangling tool calls — every assistant
+   * tool_calls id with NO matching role:"tool" message gets one, so the
+   * transcript stays protocol-valid. Returns the closed ids (event payload).
+   * Shared by the cap path today; Ship 2's finalizeTurn reuses this helper.
+   */
+  async function closeDanglingToolCalls(turnIndex, seq, content) {
+    // v0.4.0 audit 6.1: the closures MUST be event-sourced. A memory-only push
+    // is invisible to resume(), which rebuilds from tool.result events — so an
+    // aborted/capped turn would resurrect its dangling call on the next open,
+    // producing a protocol-invalid transcript. Emit a real tool.result per
+    // closure: one code path for both the live and the replayed state.
+    const closed = [];
+    for (const m of state.messages) {
+      if (m.role !== "assistant" || !Array.isArray(m.tool_calls)) continue;
+      for (const c of m.tool_calls) {
+        const id = c?.call_id ?? c?.id;
+        if (!id) continue;
+        if (state.messages.some((t) => t.role === "tool" && t.call_id === id)) continue;
+        await log.appendEvent("tool.result", "tool", {
+          call_id: id,
+          ok: false,
+          bytes: Buffer.byteLength(content, "utf8"),
+          duration_ms: 0,
+          sha256: sha256(content),
+          output: content,
+          error: content,
+          synthetic: true, // closed without executing; resume treats it as recorded
+        });
+        state.messages.push({
+          role: "tool",
+          kind: "tool-result",
+          content,
+          turn_index: turnIndex,
+          pinned: false,
+          call_id: id,
+          event_span: { first: log.seq - 1, last: log.seq - 1 },
+        });
+        closed.push(id);
+      }
+    }
+    return closed;
+  }
+
   async function runTurn(input) {
     // F1: fresh controller for THIS turn; abort() below cancels only this one.
     turnController = new AbortController();
     const signal = turnController.signal;
     turnInFlight = true;
+    // v0.4.0 2.1: finalizeTurn state — FUNCTION-scoped (try/finally bodies
+    // are separate lexical blocks in JS, so try-body `let`s are invisible to
+    // the finally); the exit paths mutate this object, the finally reads it.
+    const finalizeCtx = {
+      reason: "complete",
+      turn: 0,
+      turnIndex: 0,
+      seq: -1,
+      iterationsExhausted: true,
+    };
+    let endReason = "complete";
     try {
     state.turns += 1;
     const turn = state.turns;
     const turnIndex = turn - 1;
+    finalizeCtx.turn = turn;
+    finalizeCtx.turnIndex = turnIndex;
     const turnStartEv = await log.appendEvent("turn.start", "harness", { turn, input });
     state.messages.push({
       role: "user",
@@ -343,6 +444,8 @@ export function createLoop({
     let finalText = "";
     let turnTruncated = false; // F17: provider stream ended without [DONE]
     let iterationsExhausted = true; // F21: set false only on a clean break
+    finalizeCtx.seq = turnStartEv.seq;
+    try {
     for (let iter = 0; iter < cfg.max_iterations; iter++) {
       const provider = state.provider; // provider-admin: live seam read
       const toolSchemas = tools.schemas();
@@ -384,6 +487,7 @@ export function createLoop({
         }
       } catch (err) {
         if (err?.name === "AbortError") {
+          endReason = "aborted"; finalizeCtx.reason = "aborted";
           await log.appendEvent("session.error", "harness", {
             message: "aborted",
             code: "abort",
@@ -404,6 +508,11 @@ export function createLoop({
         estimate: final.estimate === true,
         // F17: a stream that ended without [DONE] is recorded as truncated.
         ...(final.truncated === true ? { truncated: true } : {}),
+        // v0.4.0 1.5: record tool_calls so resume rebuilds protocol-valid
+        // transcripts (extras serialize after the known canonical keys).
+        ...(Array.isArray(final.tool_calls) && final.tool_calls.length > 0
+          ? { tool_calls: final.tool_calls }
+          : {}),
       });
       if (final.estimate === true) {
         await log.appendEvent("usage.estimated", "harness", {
@@ -420,19 +529,27 @@ export function createLoop({
           first: chunkSeqs[0] ?? turnStartEv.seq,
           last: chunkSeqs[chunkSeqs.length - 1] ?? turnStartEv.seq,
         };
-        state.messages.push({
+        // v0.4.0 1.3: store the provider's tool_calls verbatim on the
+        // assistant message (provider-native objects) so the transcript
+        // round-trips the tools wire contract; text-only turns unchanged.
+        const assistantMsg = {
           role: "assistant",
           kind: "assistant",
           content: text,
           turn_index: turnIndex,
           pinned: false,
           event_span: assistantSpan,
-        });
+          ...(Array.isArray(final.tool_calls) && final.tool_calls.length > 0
+            ? { tool_calls: final.tool_calls }
+            : {}),
+        };
+        state.messages.push(assistantMsg);
         finalText = text;
 
         const calls = final.tool_calls ?? [];
         if (calls.length === 0) {
           iterationsExhausted = false;
+          finalizeCtx.iterationsExhausted = false;
           break;
         }
 
@@ -456,13 +573,33 @@ export function createLoop({
         }
       }
 
-      // F21 (review-r1): hitting max_iterations is no longer silent.
+      // F21 (review-r1) + v0.4.0 1.4 (F-D1.1): hitting max_iterations is
+      // no longer silent, and the dangling tool calls are CLOSED — each
+      // unanswered call_id gets a role:"tool" message so the next request
+      // is protocol-valid (an assistant tool_calls with no matching
+      // tool_call_id is a defect). A synthetic assistant echo is WRONG
+      // (still dangling); the tool-side close is the correct shape.
       if (iterationsExhausted) {
+        // v0.4.0 1.4: close EVERY unanswered tool call in the transcript —
+        // not just this turn's final frame (a previous turn's error may have
+        // left a dangling pair) — then record the cap.
+        const closed = await closeDanglingToolCalls(turnIndex, turnStartEv.seq, "{\"error\":\"iteration limit reached; tool call not executed\"}");
+        await log.appendEvent("turn.cap", "harness", {
+          turn,
+          max_iterations: cfg.max_iterations,
+          closed_calls: closed,
+        });
         await log.appendEvent("session.error", "harness", {
           message: `max_iterations (${cfg.max_iterations}) reached; turn ended with pending tool calls`,
           code: "max-iterations",
         });
       }
+    } catch (err) {
+      // v0.4.0 2.1: any exception escaping the loop is the "error" reason
+      // (AbortError already returned above with reason "aborted" set).
+      endReason = "error"; finalizeCtx.reason = "error";
+      throw err;
+    }
 
     // Verify gate: runs after any turn that edited files (F19 — tracked from
     // tool result payloads above; wired by cli.js / server.js).
@@ -511,6 +648,7 @@ export function createLoop({
           });
           await emitAskResolution(call_id, res);
           if (res.verdict !== "allow") {
+            endReason = "verify-denied"; finalizeCtx.reason = "verify-denied";
             await log.appendEvent("session.error", "harness", {
               message: "verify-gate failed; not allowed to continue",
               code: "verify-gate",
@@ -574,6 +712,7 @@ export function createLoop({
         freed_events: freed,
       });
     } else if (decision.verdict === "block") {
+      endReason = "error"; finalizeCtx.reason = "error"; // context block (2.1)
       await log.appendEvent("session.error", "harness", {
         message: decision.reason ?? "context-limit-uncompacted",
         code: "context",
@@ -583,12 +722,30 @@ export function createLoop({
 
     return { text: finalText, aborted: false, truncated: turnTruncated };
     } finally {
-      // provider-admin §1: the turn boundary. The in-flight flag drops first
-      // so a queued setProvider now sees a between-turns state; then the
-      // queued swap applies and emits session.provider.switch BEFORE the next
-      // turn reads state.provider. Every exit path (clean return, verify-gate
-      // deny, block, throw, abort) reaches this finally — a queued switch is
-      // never lost and never applied mid-turn.
+      // v0.4.0 2.1 — finalizeTurn: EVERY exit path (clean return, cap,
+      // verify-gate deny, thrown error, abort, context block) funnels here.
+      // Reads ONLY the function-scoped finalizeCtx (try-body lets are
+      // invisible to a finally — separate lexical blocks in JS).
+      //  (a) dangling tool calls closed (Ship 1.4's helper — reuse);
+      //  (b) turn.end {reason} records HOW the turn ended;
+      //  (c) in-flight flag + queued provider swap (provider-admin §1).
+      let reason = finalizeCtx.reason;
+      if (reason === "complete" && finalizeCtx.iterationsExhausted) reason = "cap";
+      try {
+        const closed = await closeDanglingToolCalls(finalizeCtx.turnIndex, finalizeCtx.seq, "{\"error\":\"turn ended; tool call not executed\"}");
+        await log.appendEvent("turn.end", "harness", {
+          turn: finalizeCtx.turn,
+          reason,
+          closed_calls: closed,
+        });
+      } catch (finalizeErr) {
+        // The finalize layer must never mask the primary outcome; a failure
+        // here is logged, not thrown over the turn's own result.
+        await log.appendEvent("session.error", "harness", {
+          message: `finalize failed: ${finalizeErr?.message ?? finalizeErr}`,
+          code: "finalize",
+        }).catch(() => {});
+      }
       turnInFlight = false;
       await flushQueuedProvider();
     }
@@ -681,6 +838,11 @@ export function createLoop({
             turn_index: currentTurnIndex,
             pinned: false,
             event_span: { first: chunkFirst === -1 ? ev.seq : chunkFirst, last: ev.seq },
+            // v0.4.0 1.5: rebuild the tool_calls recorded on this event so a
+            // resumed transcript is protocol-valid (1.1 wire shape).
+            ...(Array.isArray(ev.data.tool_calls) && ev.data.tool_calls.length > 0
+              ? { tool_calls: ev.data.tool_calls }
+              : {}),
           });
           state.totalInput += ev.data.input_tokens ?? 0;
           state.totalOutput += ev.data.output_tokens ?? 0;
@@ -705,6 +867,7 @@ export function createLoop({
             content: ev.data.output ?? (ev.data.ok ? "" : ev.data.error ?? ""),
             turn_index: currentTurnIndex,
             pinned: false,
+            call_id: ev.data.call_id, // v0.4.0 1.6: restore the pairing key
             event_span: { first: proposed.get(ev.data.call_id) ?? ev.seq, last: ev.seq },
           });
           break;

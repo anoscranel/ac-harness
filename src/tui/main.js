@@ -13,7 +13,7 @@
 
 import { resolve } from "node:path";
 
-const HARNESS_VERSION = "0.3.0";
+import { HARNESS_VERSION } from "../version.js";
 const DISPLAY_NAME = "ac-harness";
 // --- TTY gate (before any wiring): graceful non-TTY exit --------------------
 if (!process.stdout.isTTY || process.env.TERM === "dumb") {
@@ -507,6 +507,7 @@ async function main() {
       }
     }
     try {
+      turnBusy = true;
       const res = await loop.start(text);
       if (loop.state.ended) {
         // verify-gate deny may end the session mid-turn; surface + exit
@@ -514,6 +515,8 @@ async function main() {
       }
     } catch (err) {
       appendRows([`${style.red}error: ${err.message}${style.reset}`]);
+    } finally {
+      turnBusy = false;
     }
     paint();
   }
@@ -526,6 +529,13 @@ async function main() {
     composer.setWidth(Math.max(10, screen.cols - 4));
     paint();
   });
+
+  // v0.4.0 2.3: SIGINT aborts an in-flight turn first; the existing
+  // quit/teardown path remains the idle behavior. Second SIGINT inside a
+  // busy turn = loud force exit (escape hatch), still through teardown so
+  // the alt-screen is never left dirty.
+  let turnBusy = false;
+  let lastSigint = 0;
 
   // --- exit paths: one teardown for quit/crash/signals (spec §1) ------------
   let tornDown = false;
@@ -541,12 +551,26 @@ async function main() {
     screen.leave(); // ShowCaret + LeaveAltScreen + normal video
   }
   process.on("exit", teardown);
-  for (const sig of ["SIGINT", "SIGTERM"]) {
-    process.on(sig, () => {
-      ask.abortPending(); // an in-flight ask resolves deny; the loop records it
-      quit(0);
-    });
-  }
+  process.on("SIGTERM", () => {
+    ask.abortPending(); // an in-flight ask resolves deny; the loop records it
+    quit(0);
+  });
+  process.on("SIGINT", () => {
+    if (turnBusy) {
+      const now = Date.now();
+      if (now - lastSigint < 2000) {
+        appendRows([`${style.red}sigint×2 — force exit mid-turn${style.reset}`]);
+        teardown();
+        process.exit(130);
+      }
+      lastSigint = now;
+      appendRows([`${style.yellow}sigint — aborting turn (again within 2s = force exit)${style.reset}`]);
+      loop.abort();
+      return;
+    }
+    ask.abortPending(); // an in-flight ask resolves deny; the loop records it
+    quit(0);
+  });
 
   // --- loop wiring: EXACTLY cli.js chat()'s shape (echo default) ------------
   const askResolver = ask.resolver; // SAME contract as the REPL askResolver

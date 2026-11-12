@@ -15,7 +15,7 @@ import { createInterface } from "node:readline";
 import { resolve } from "node:path";
 import { EventLog, readAll, canonicalize, sha256 } from "./events.js";
 
-const HARNESS_VERSION = "0.3.0";
+import { HARNESS_VERSION } from "./version.js";
 
 async function replayCommand(logPath) {
   const events = await readAll(logPath);
@@ -154,6 +154,8 @@ async function chat() {
   // line is processed (a fast "/quit" must not kill a running turn).
   let queue = Promise.resolve();
   let closed = false;
+  let turnBusy = false; // v0.4.0 2.3: set while a turn is in flight
+  let lastSigint = 0; // v0.4.0 2.3: second-SIGINT escape hatch
   rl.on("line", (line) => {
     queue = queue.then(() => handleLine(line.trim())).catch((err) => {
       process.stdout.write(`error: ${err.message}\n`);
@@ -227,8 +229,13 @@ async function chat() {
             process.stdout.write(`unknown command: ${cmd}\n`);
         }
       } else if (input) {
-        const res = await loop.start(input);
-        process.stdout.write(`${res.text}\n`);
+        turnBusy = true;
+        try {
+          const res = await loop.start(input);
+          process.stdout.write(`${res.text}\n`);
+        } finally {
+          turnBusy = false;
+        }
       }
     } catch (err) {
       process.stdout.write(`error: ${err.message}\n`);
@@ -244,6 +251,26 @@ async function chat() {
       process.stdout.write(`\nsession ended; canonical sha256: ${log.canonicalSha256()}\n`);
       process.exit(0);
     });
+  });
+
+  // v0.4.0 2.3: SIGINT aborts an in-flight turn (turn.end reason "aborted"
+  // lands via finalizeTurn); when idle it ends the session cleanly. A SECOND
+  // SIGINT within a turn is the user escape hatch: immediate loud exit.
+  process.on("SIGINT", () => {
+    const now = Date.now();
+    if (turnBusy) {
+      if (now - lastSigint < 2000) {
+        process.stdout.write("\n[sigint×2] force-exiting mid-turn\n");
+        // eslint-disable-next-line no-process-exit
+        process.exit(130);
+      }
+      lastSigint = now;
+      process.stdout.write("\n[sigint] aborting turn… (again within 2s = force exit)\n");
+      loop.abort();
+      return;
+    }
+    // idle: the default action — close the readline (end-of-session path)
+    rl.close();
   });
 }
 
