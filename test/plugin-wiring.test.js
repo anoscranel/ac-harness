@@ -3,6 +3,7 @@
 // winners (verify-gate adaptation + compaction-trigger override), and the
 // on-event circuit breaker (3 consecutive throws → disabled + violation).
 import { test } from "node:test";
+import { waitFor } from "./helpers-timing.js";
 import assert from "node:assert/strict";
 import { mkdtemp, rm, mkdir, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
@@ -181,8 +182,12 @@ test("on-event circuit breaker: 3 consecutive throws → disabled + policy.viola
     const { loop, log: loopLog } = await makeLoop(dir, { wired });
     await loop.start("hi");
     await loop.end();
-    // Let the async hook chain settle.
-    await new Promise((r) => setTimeout(r, 200));
+    // v0.7.0 flake-class: AWAIT the hook-chain's effect instead of a fixed
+    // 200ms nap — the violations ride async promises; poll the log with a guard.
+    await waitFor(
+      () => loopLog.events.some((e) => e.type === "plugin.violation"),
+      { timeoutMs: 5_000, stepMs: 10, label: "hook-error violations logged" },
+    );
 
     const hookErrors = loopLog.events.filter(
       (e) => e.type === "plugin.violation" && e.data.kind === "hook-error" && e.data.plugin === "always-throws",

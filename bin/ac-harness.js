@@ -40,6 +40,12 @@ switch (cmd) {
     }
     run("src/cli.js", ["replay", rest[0]]);
     break;
+  case "mcp-server": // ship-3: the harness AS an MCP server (stdio, tools only)
+    run("src/mcp-server.js", []);
+    break;
+  case "acp": // ship-3: the ACP agent side (separate process — one protocol per process)
+    run("src/acp.js", []);
+    break;
   case "stats": // v0.5.0 H6
     if (!rest[0]) {
       process.stderr.write("usage: ac-harness stats <log>\n");

@@ -59,6 +59,7 @@ export const ACTORS = Object.freeze([
   "policy",
   "plugin",
   "compaction",
+  "remote", // ship-3 (spec §1): calls arriving via the mcp-server/ACP surfaces
 ]);
 
 const TYPE_SET = new Set(EVENT_TYPES);
@@ -212,7 +213,13 @@ export const SECRET_PATTERNS = [
   /([A-Z][A-Z0-9_]{2,}(?:KEY|TOKEN|SECRET))=(["'])[^"']*\2/g, // KEY="value" (quoted)
 ];
 
-function redact(value) {
+/**
+ * v0.7.0 A3 (audit-pending-v070): exported so DURABLE stores outside the
+ * event log (the memory file) screen records with the SAME pattern list —
+ * one redaction implementation, zero duplicated regexes. The event log
+ * remains the primary caller; memory.js must never re-derive this.
+ */
+export function redact(value) {
   if (typeof value === "string") {
     let out = value;
     for (const re of SECRET_PATTERNS) {

@@ -224,7 +224,16 @@ export class McpClient {
   }
 
   async close() {
-    for (const [, p] of this.#pending) clearTimeout(p.timer);
+    // v0.7.0 flake-fix (the 304s hang): clear the timers AND settle the
+    // promises. A caller awaiting listTools/callTool while close() runs
+    // previously hung until the 30s timers fired — and a response that could
+    // never arrive (the child is dead) left the await unsignalled. Every
+    // pending request now rejects with a legible "client closed" so awaiting
+    // code fails fast instead of parking the event loop.
+    for (const [id, p] of this.#pending) {
+      clearTimeout(p.timer);
+      p.reject(new Error(`MCP request aborted: client closed (id ${id})`));
+    }
     this.#pending.clear();
     this.#killGroup();
   }

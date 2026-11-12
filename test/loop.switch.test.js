@@ -15,6 +15,7 @@ import { createRegistry } from "../src/tools/index.js";
 import echo from "../src/providers/echo.js";
 import { decide } from "../src/context.js";
 import { createLoop } from "../src/loop.js";
+import { waitFor } from "./helpers-timing.js";
 
 /** Synthetic provider: pure, configurable id/model, slow stream for mid-turn probes. */
 function makeProvider(id, model, { slowMs = 0 } = {}) {
@@ -66,7 +67,7 @@ async function makeLoop(dir, { provider = makeProvider("p-a", "m-a") } = {}) {
   return { loop, log };
 }
 
-test("setProvider between turns: applies immediately, event {from,to,model}, persists", async () => {
+test("setProvider between turns: applies immediately, event {from,to,model}, persists", { timeout: 15_000 }, async () => {
   const dir = await mkdtemp(join(tmpdir(), "harness-switch-"));
   try {
     const { loop, log } = await makeLoop(dir);
@@ -89,7 +90,7 @@ test("setProvider between turns: applies immediately, event {from,to,model}, per
   }
 });
 
-test("setProvider to the already-active provider is a no-op (no event)", async () => {
+test("setProvider to the already-active provider is a no-op (no event)", { timeout: 15_000 }, async () => {
   const dir = await mkdtemp(join(tmpdir(), "harness-switch-"));
   try {
     const { loop, log } = await makeLoop(dir);
@@ -111,10 +112,14 @@ function makeGatedProvider(id, model) {
   const gate = new Promise((r) => {
     release = r;
   });
+  // v0.7.0 flake-class: a deterministic INSIDE-THE-STREAM signal. Callers
+  // await p.streamStarted instead of sleeping "+10ms to reach the gate" —
+  // under load that nap raced the generator.
   const p = {
     id,
     model,
     released: false,
+    streamStarted: null,
     async *stream(request, { signal } = {}) {
       // abort-race safe (deviation 104): a listener on an ALREADY-aborted
       // signal never fires — under batch load the abort can land before the
@@ -133,6 +138,7 @@ function makeGatedProvider(id, model) {
         if (signal?.aborted) fire();
         else signal?.addEventListener("abort", fire, { once: true });
       });
+      p.resolveStreamStarted?.();
       await Promise.race([gate, aborted]);
       const text = `${id}: ${request.messages.at(-1)?.content ?? ""}`;
       yield { delta: text, done: false };
@@ -145,6 +151,7 @@ function makeGatedProvider(id, model) {
       };
     },
   };
+  p.streamStarted = new Promise((r) => { p.resolveStreamStarted = r; });
   p.release = () => {
     p.released = true;
     release();
@@ -152,10 +159,11 @@ function makeGatedProvider(id, model) {
   return p;
 }
 
-test("mid-turn setProvider queues; the in-flight turn completes on the OLD provider", async () => {
+test("mid-turn setProvider queues; the in-flight turn completes on the OLD provider", { timeout: 15_000 }, async () => {
   const dir = await mkdtemp(join(tmpdir(), "harness-switch-"));
   try {
-    const { loop, log } = await makeLoop(dir, { provider: makeGatedProvider("p-a", "m-a") });
+    const gateProvider = makeGatedProvider("p-a", "m-a");
+    const { loop, log } = await makeLoop(dir, { provider: gateProvider });
     let turnDone = false;
     const turnPromise = (async () => {
       const res = await loop.start("gated");
@@ -163,11 +171,12 @@ test("mid-turn setProvider queues; the in-flight turn completes on the OLD provi
       return res;
     })();
 
-    // The stream is now suspended INSIDE the turn — no race possible.
-    for (let i = 0; i < 500 && !log.events.some((e) => e.type === "turn.start"); i++) {
-      await new Promise((r) => setTimeout(r, 2));
-    }
-    await new Promise((r) => setTimeout(r, 10)); // let the generator reach the gate
+    // v0.7.0 flake-class: an AWAITED in-stream signal, not a "+10ms" nap —
+    // once the generator signals, the turn is provably parked at the gate.
+    await waitFor(() => log.events.some((e) => e.type === "turn.start"), {
+      timeoutMs: 5_000, stepMs: 5, label: "turn.start logged",
+    });
+    await gateProvider.streamStarted; // the generator IS inside the stream now
     const queued = await loop.setProvider(makeProvider("p-b", "m-b"));
     assert.equal(queued, true);
     // Not applied yet, not even logged — the boundary owns it.
@@ -193,16 +202,16 @@ test("mid-turn setProvider queues; the in-flight turn completes on the OLD provi
   }
 });
 
-test("abort during a queued switch: the turn aborts cleanly, the queued swap still lands at the boundary", async () => {
+test("abort during a queued switch: the turn aborts cleanly, the queued swap still lands at the boundary", { timeout: 15_000 }, async () => {
   const dir = await mkdtemp(join(tmpdir(), "harness-switch-"));
   try {
     const gateProvider = makeGatedProvider("p-a", "m-a");
     const { loop, log } = await makeLoop(dir, { provider: gateProvider });
     const turnPromise = loop.start("will-be-aborted");
-    for (let i = 0; i < 500 && !log.events.some((e) => e.type === "turn.start"); i++) {
-      await new Promise((r) => setTimeout(r, 2));
-    }
-    await new Promise((r) => setTimeout(r, 10)); // generator reaches the gate
+    await waitFor(() => log.events.some((e) => e.type === "turn.start"), {
+      timeoutMs: 5_000, stepMs: 5, label: "turn.start logged (abort path)",
+    });
+    await gateProvider.streamStarted; // generator IS parked at the gate
     await loop.setProvider(makeProvider("p-b", "m-b")); // queued mid-turn
     loop.abort();
     const res = await turnPromise;
@@ -220,7 +229,7 @@ test("abort during a queued switch: the turn aborts cleanly, the queued swap sti
   }
 });
 
-test("setProvider validates its argument shape", async () => {
+test("setProvider validates its argument shape", { timeout: 15_000 }, async () => {
   const dir = await mkdtemp(join(tmpdir(), "harness-switch-"));
   try {
     const { loop } = await makeLoop(dir);

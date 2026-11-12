@@ -329,7 +329,7 @@ test("H3: read without paging args on a small file is byte-identical to today", 
   }
 });
 
-test("H3: grep caps a 5 KB single line at 300 columns + truncated:true", { skip: !probeRg() }, async () => {
+test("H3: grep caps a 5 KB single line at 300 columns + truncated:true", { skip: !probeRg(), timeout: 15_000 }, async () => {
   const dir = await mkdtemp(join(tmpdir(), "h3c-"));
   try {
     const f = join(dir, "minified.txt");
@@ -352,6 +352,7 @@ test("H3: grep caps a 5 KB single line at 300 columns + truncated:true", { skip:
 
 // ---------- H4: per-session server dispatch ----------
 import { spawn } from "node:child_process";
+import { waitFor } from "./helpers-timing.js";
 
 function clientSession(child, lines) {
   // write then collect responses by id
@@ -382,7 +383,7 @@ function clientSession(child, lines) {
 
 function waitMs(ms) { return new Promise((r) => setTimeout(r, ms)); }
 
-test("H4: a blocked prompt on one session does not block another session or session.create", async () => {
+test("H4: a blocked prompt on one session does not block another session or session.create", { timeout: 45_000 }, async () => {
   const root = new URL("..", import.meta.url).pathname;
   const logA = join(root, "logs", "h4-A.jsonl");
   const child = spawn(process.execPath, [join(root, "src", "server.js")], { stdio: ["pipe", "pipe", "pipe"] });
@@ -409,9 +410,24 @@ test("H4: a blocked prompt on one session does not block another session or sess
     for (let i = 0; i < 100 && !seen.has("createB"); i++) await waitMs(50);
     assert.ok(seen.has("createB"), "create B acked");
 
-    // pA blocks (its provider retries); pB and cC are pipelineable NOW:
+    // pA blocks (its provider retries against a refused socket). pB and cC
+    // are pipelineable ONLY AFTER pA has provably STARTED — v0.7.0 flake-class:
+    // the old fixed 100ms nap raced the request landing on A's chain under
+    // load. The deterministic signal is A's OWN LOG (logA is ours): once
+    // A's turn.start is on disk, pA is inside its turn and blocking.
     send("pA", "session.prompt", { session_id: "H4-A", input: "blocked" });
-    await waitMs(100); // let pA land on A's chain
+    const { readAll: readA } = await import("../src/events.js");
+    await waitFor(
+      async () => {
+        try {
+          const evs = await readA(logA);
+          return evs.some((e) => e.type === "turn.start");
+        } catch {
+          return false; // log not created yet — keep waiting
+        }
+      },
+      { timeoutMs: 10_000, stepMs: 20, label: "session A's turn.start in its own log" },
+    );
     send("pB", "session.prompt", { session_id: "H4-B", input: "free" });
     send("cC", "session.create", { session: "H4-C" });
     const t0 = Date.now();
@@ -424,7 +440,7 @@ test("H4: a blocked prompt on one session does not block another session or sess
     child.kill("SIGKILL");
     try { await rm(logA, { force: true }); } catch {}
   }
-}, { timeout: 30_000 });
+});
 
 // ---------- H5: per-provider context limit ----------
 test("H5: provider.contextLimit reaches decide()'s snapshot; absent → 128000", async () => {

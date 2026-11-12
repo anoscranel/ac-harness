@@ -6,6 +6,8 @@ import write from "./write.js";
 import edit from "./edit.js";
 import grep from "./grep.js";
 import bash from "./bash.js";
+import memory from "./memory.js";
+import delegate from "./delegate.js";
 import { validate } from "../internal/jsonschema.js";
 
 export const builtinTools = Object.freeze({
@@ -14,6 +16,12 @@ export const builtinTools = Object.freeze({
   edit,
   grep,
   bash,
+  // memory: recall is safe to auto-run; remember writes to a durable store, so
+  // policy should treat it like an edit (see src/policy-defaults.js).
+  memory_recall: memory.recall,
+  memory_remember: memory.remember,
+  // delegation = a child run: gated ask below (it inherits parent approval only)
+  delegate: delegate,
 });
 
 /**

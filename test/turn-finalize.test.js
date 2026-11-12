@@ -12,6 +12,7 @@ import { Policy } from "../src/policy.js";
 import { defaultRules } from "../src/policy-defaults.js";
 import { decide } from "../src/context.js";
 import { createLoop } from "../src/loop.js";
+import { waitFor } from "./helpers-timing.js";
 
 function makeLoop(logPath, { provider, tools, askResolver } = {}) {
   const policy = new Policy({ rules: defaultRules(), logPath });
@@ -56,19 +57,11 @@ function echoProvider() {
   };
 }
 
-const CANCEL = (m) => new Promise((res, rej) => {
-  let done = false;
-  (async () => {
-    await new Promise((r) => setTimeout(r, m));
-    if (!done) rej(Object.assign(new Error("timeout"), { name: "X" }));
-  })();
-});
-
 async function readEvents(path) {
   return readAll(path);
 }
 
-test("2.1 turn.end {reason:complete} on a clean text turn", async () => {
+test("2.1 turn.end {reason:complete} on a clean text turn", { timeout: 15_000 }, async () => {
   const dir = await mkdtemp(join(tmpdir(), "s2-"));
   try {
     const lp = join(dir, "ev.jsonl");
@@ -84,7 +77,7 @@ test("2.1 turn.end {reason:complete} on a clean text turn", async () => {
   }
 });
 
-test("2.1 turn.end {reason:cap} closes dangling calls; no double-close on later turns", async () => {
+test("2.1 turn.end {reason:cap} closes dangling calls; no double-close on later turns", { timeout: 15_000 }, async () => {
   const dir = await mkdtemp(join(tmpdir(), "s2-"));
   try {
     const lp = join(dir, "ev.jsonl");
@@ -121,7 +114,7 @@ test("2.1 turn.end {reason:cap} closes dangling calls; no double-close on later 
   }
 });
 
-test("2.1 turn.end {reason:error} on a thrown provider error + dangling closed", async () => {
+test("2.1 turn.end {reason:error} on a thrown provider error + dangling closed", { timeout: 15_000 }, async () => {
   const dir = await mkdtemp(join(tmpdir(), "s2-"));
   try {
     const lp = join(dir, "ev.jsonl");
@@ -151,10 +144,11 @@ test("2.1 turn.end {reason:error} on a thrown provider error + dangling closed",
   }
 });
 
-test("2.1 turn.end {reason:aborted} on an AbortError mid-stream", async () => {
+test("2.1 turn.end {reason:aborted} on an AbortError mid-stream", { timeout: 15_000 }, async () => {
   const dir = await mkdtemp(join(tmpdir(), "s2-"));
   try {
     const lp = join(dir, "ev.jsonl");
+    let streamParked = null;
     const slow = {
       id: "slow", model: "slow",
       async *stream(request, { signal } = {}) {
@@ -163,7 +157,9 @@ test("2.1 turn.end {reason:aborted} on an AbortError mid-stream", async () => {
         }
         yield { delta: "partial", done: false };
         await new Promise((res, rej) => {
+          streamParked?.();
           const t = setTimeout(res, 30_000);
+          t.unref?.();
           const onAbort = () => { clearTimeout(t); rej(Object.assign(new Error("x"), { name: "AbortError" })); };
           if (signal?.aborted) onAbort();
           else signal?.addEventListener("abort", onAbort, { once: true });
@@ -172,8 +168,10 @@ test("2.1 turn.end {reason:aborted} on an AbortError mid-stream", async () => {
       },
     };
     const { loop, log } = await makeLoopAsync(lp, { provider: slow });
+    const parked = new Promise((r) => { streamParked = r; });
     const p = loop.start("slow turn");
-    setTimeout(() => loop.abort(), 30);
+    await parked; // v0.7.0 flake-class: in-stream signal, not "30ms should do it"
+    loop.abort();
     const res = await p;
     assert.equal(res.aborted, true);
     const ends = log.events.filter((e) => e.type === "turn.end");
@@ -185,7 +183,7 @@ test("2.1 turn.end {reason:aborted} on an AbortError mid-stream", async () => {
   }
 });
 
-test("2.1 turn.end {reason:error} on context-block (compaction block verdict)", async () => {
+test("2.1 turn.end {reason:error} on context-block (compaction block verdict)", { timeout: 15_000 }, async () => {
   const dir = await mkdtemp(join(tmpdir(), "s2-"));
   try {
     const lp = join(dir, "ev.jsonl");
@@ -212,7 +210,7 @@ test("2.1 turn.end {reason:error} on context-block (compaction block verdict)", 
   }
 });
 
-test("2.2 torn tail: a truncated last line is skipped, not fatal; log.torn_tail reported", async () => {
+test("2.2 torn tail: a truncated last line is skipped, not fatal; log.torn_tail reported", { timeout: 15_000 }, async () => {
   const dir = await mkdtemp(join(tmpdir(), "s2-"));
   try {
     const lp = join(dir, "ev.jsonl");
@@ -225,8 +223,12 @@ test("2.2 torn tail: a truncated last line is skipped, not fatal; log.torn_tail 
     const reopened = await EventLog.open(lp);
     assert.ok(Array.isArray(reopened.events));
     assert.equal(reopened.events.filter((e) => e.type === "session.start").length, 1);
-    // wait for the async torn_tail append to ride the chain, then read back
-    await new Promise((r) => setTimeout(r, 60));
+    // v0.7.0 flake-class: AWAIT the chain's write instead of a fixed 60ms —
+    // the event lands when the append chain flushes; poll with a guard.
+    await waitFor(
+      async () => (await readEvents(lp)).some((e) => e.type === "log.torn_tail"),
+      { timeoutMs: 5_000, stepMs: 10, label: "log.torn_tail ridden the append chain" },
+    );
     const disk = await readEvents(lp);
     const torn = disk.filter((e) => e.type === "log.torn_tail");
     assert.equal(torn.length, 1, "log.torn_tail event recorded on open");
@@ -240,7 +242,7 @@ test("2.2 torn tail: a truncated last line is skipped, not fatal; log.torn_tail 
   }
 });
 
-test("2.3 SIGINT wiring: mid-turn SIGINT → abort; turn.end reason aborted; clean exit 0", async () => {
+test("2.3 SIGINT wiring: mid-turn SIGINT → abort; turn.end reason aborted; clean exit 0", { timeout: 45_000 }, async () => {
   const dir = await mkdtemp(join(tmpdir(), "s2-child-"));
   try {
     const lp = join(dir, "ev.jsonl");
@@ -265,7 +267,9 @@ test("2.3 SIGINT wiring: mid-turn SIGINT → abort; turn.end reason aborted; cle
         }
         yield { delta: "p", done: false };
         await new Promise((res, rej) => {
+          streamParked?.(); // v0.7.0 flake-class: parked-in-stream signal
           const t = setTimeout(res, 30_000);
+          t.unref?.();
           const onAbort = () => {
             clearTimeout(t);
             rej(Object.assign(new Error("x"), { name: "AbortError" }));
@@ -283,6 +287,7 @@ test("2.3 SIGINT wiring: mid-turn SIGINT → abort; turn.end reason aborted; cle
       config: { session: "sigint" },
     });
     let turnBusy = false;
+    let streamParked = null;
     const prev = process.listeners("SIGINT");
     process.removeAllListeners("SIGINT");
     process.on("SIGINT", () => {
@@ -290,13 +295,13 @@ test("2.3 SIGINT wiring: mid-turn SIGINT → abort; turn.end reason aborted; cle
     });
     try {
       turnBusy = true;
+      const parked = new Promise((r) => { streamParked = r; });
       const turnP = loop.start("slow turn");
-      // let the turn reach its gated stream, then deliver the SIGNAL to the
-      // installed handlers (process.kill in-batch is runner-dependent — the
-      // observable contract is handler→abort→finalize, which this pins
-      // exactly; a true `kill -INT` probe is covered by the CLI's EPIPE/manual
-      // flow, recorded in deviations).
-      await new Promise((r) => setTimeout(r, 50));
+      // v0.7.0 flake-class: wait for the stream to PARK (in-stream signal),
+      // then deliver the signal to the installed handlers. process.kill
+      // in-batch is runner-dependent; handler→abort→finalize is the exact
+      // contract this pins (recorded in deviations).
+      await parked;
       for (const l of process.listeners("SIGINT")) l();
       const res = await turnP;
       assert.equal(res.aborted, true, "SIGINT aborted the in-flight turn");

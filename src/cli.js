@@ -310,6 +310,179 @@ async function main() {
     await replayCommand(resolve(rest[0]));
     return;
   }
+  if (cmd === "run") {
+    // Headless one-shot: no REPL, no TUI, no interaction. `run` is the
+    // primitive both deferred features need — cron (a scheduled run) and
+    // delegate (a child run) are this exact code path plus a trigger.
+    //
+    //   node src/cli.js run "fix the failing test"
+    //   node src/cli.js run --provider echo "tool:bash {\"cmd\":\"ls\"}"   (CI)
+    //   node src/cli.js run --policy-allow read "what is here?"       (no asks)
+    //
+    // Exit codes follow the checkpoint gate: 0 = clean, 1 = tool/policy
+    // failure, 2 = usage error. `--policy-allow` PRE-WRITES a session allow
+    // rule for one tool (single-turn convenience for CI and cron, not a
+    // backdoor: it widens nothing for later invocations).
+    const { Policy } = await import("./policy.js");
+    const { defaultRules } = await import("./policy-defaults.js");
+    const { createRegistry } = await import("./tools/index.js");
+    const { createProviderRegistry } = await import("./providers/registry.js");
+    const { default: echo } = await import("./providers/echo.js");
+    const { createLoop } = await import("./loop.js");
+    const { createDefaultVerifyGate } = await import("./verify.js");
+
+    // ALL --policy-allow pairs become session rules. The security posture:
+    // each listed tool is EXPLICIT, the argv is the audit record, and the
+    // rules die with this run (in-memory only). Whoever authorises the
+    // invocation authorises the whole declared list — one approval, one
+    // consistent set, nothing hidden (delegate's list is visible at its
+    // own ask-gate in the parent).
+    const argv = [...rest];
+    const allowTools = [];
+    for (let i = 0; i < argv.length; ) {
+      if (argv[i] === "--policy-allow" && i + 1 < argv.length) {
+        allowTools.push(argv[i + 1]);
+        argv.splice(i, 2);
+      } else {
+        i += 1;
+      }
+    }
+
+    // D2 (audit-delegate): depth backstop. AC_DELEGATE_CHILD=1 means THIS
+    // run IS a delegate child; a child may never spawn a grandchild. The
+    // delegate tool's tool-list filter is the primary guarantee; this is the
+    // promised backstop — an explicit --policy-allow delegate inside a child
+    // is a hard error, not a quiet filter.
+    if (process.env.AC_DELEGATE_CHILD === "1" && allowTools.includes("delegate")) {
+      process.stderr.write("run: a delegate child cannot spawn a grandchild (depth is capped at 1)\n");
+      process.exit(2);
+    }
+    const providerFlag = argv.indexOf("--provider");
+    let providerId = "echo";
+    if (providerFlag >= 0) {
+      providerId = argv[providerFlag + 1];
+      argv.splice(providerFlag, 2);
+    }
+    const prompt = argv.filter((a) => !a.startsWith("--")).join(" ");
+    if (!prompt) {
+      process.stderr.write("usage: node src/cli.js run [--provider <id>] [--policy-allow <tool>] <prompt>\n");
+      process.exit(2);
+    }
+
+    const sessionId = `run-${Date.now()}`;
+    const logPath = resolve(`logs/${sessionId}.jsonl`);
+    const log = await EventLog.open(logPath);
+    const rules = defaultRules();
+    const policy = new Policy({ rules, logPath });
+
+    for (const t of allowTools) {
+      // single-turn session rule; never persists (in-memory only)
+      policy.addSessionRule({ tool: t }, "allow");
+    }
+
+    let provider;
+    if (providerId === "echo") {
+      provider = echo;
+    } else {
+      const reg = createProviderRegistry();
+      provider = reg.get(providerId);
+      if (!provider) {
+        process.stderr.write(`unknown provider: ${providerId} (have: echo ${reg.ids?.().join(" ") || ""})\n`);
+        process.exit(2);
+      }
+    }
+
+    // Headless mode must NEVER hang on a permission prompt: the deny-and-
+    // continue pattern (unattended deny, as reference CLIs converged on) — an
+    // unattended run fails closed and keeps going, it does not wait for a
+    // human who is not there.
+    const askResolver = async (ask) => ({ action: "deny", reason: "headless: no human to ask" });
+    const decide = (await import("./context.js")).decide;
+    const loop = createLoop({
+      provider,
+      tools: createRegistry(),
+      policy,
+      log,
+      decide,
+      askResolver,
+      config: { session: sessionId, harness_version: HARNESS_VERSION },
+    });
+
+    let failed = false;
+    try {
+      await loop.start(prompt);
+    } catch (e) {
+      failed = true;
+      process.stderr.write(`run error: ${e && e.message}\n`);
+    }
+    const st = loop.state;
+    const out = {
+      session: sessionId,
+      log: logPath,
+      turns: st.turns ?? null,
+      tokens: st.lastUsage ?? null,
+      ok: !failed,
+    };
+    process.stdout.write(JSON.stringify(out, null, 2) + "\n");
+    if (failed) process.exit(1);
+    return;
+  }
+  if (cmd === "cron") {
+    // cron-as-data: WHAT runs lives here; STARTING it stays external
+    // (termux-job-scheduler, crond, or the operator's session). The harness
+    // never runs a daemon on a phone-class device.
+    const { CronStore } = await import("./cron.js");
+    const store = new CronStore({});
+    const sub = rest[0] ?? "list";
+    const [, ...args] = rest;
+    if (sub === "list") {
+      const jobs = await store.list();
+      if (!jobs.length) { process.stdout.write("no cron jobs defined\n"); return; }
+      for (const j of jobs) {
+        process.stdout.write(
+          `${j.name.padEnd(20)} every ${String(j.schedule_hours).padStart(4)}h  ` +
+          `last: ${j.last_run ? j.last_run.slice(0, 16) + " " + (j.last_outcome ?? "?") : "never"}  ` +
+          `allow: ${j.allow.join(",")}\n`,
+        );
+      }
+      return;
+    }
+    if (sub === "define") {
+      // cron define <name> <hours> <prompt...>
+      const name = args[0], hours = Number(args[1]), prompt = args.slice(2).join(" ");
+      if (!name || !Number.isFinite(hours) || !prompt) {
+        process.stderr.write("usage: node src/cli.js cron define <name> <hours> <prompt>\n");
+        process.exit(2);
+      }
+      const j = await store.define({ name, schedule_hours: hours, prompt });
+      process.stdout.write(`defined ${j.id} (${name})\n`);
+      return;
+    }
+    if (sub === "tick") {
+      // the runner is headless run with the job's allowlist
+      const { run: delegateRun } = await import("./tools/delegate.js");
+      const force = args.includes("--force");
+      const results = await store.tick(
+        async (job) => delegateRun({ prompt: job.prompt, allow: job.allow }, { cwd: process.cwd() }),
+        { force },
+      );
+      for (const r of results) {
+        process.stdout.write(r.ran ? `${r.name}: ${r.ok ? "ok" : "FAILED"}\n` : `${r.name}: skipped (${r.skipped})\n`);
+      }
+      return;
+    }
+    if (sub === "rm") {
+      if (!args[0]) { process.stderr.write("usage: node src/cli.js cron rm <name-or-id>\n"); process.exit(2); }
+      const jobs = await store.list();
+      const target = jobs.find((j) => j.id === args[0] || j.name === args[0]);
+      if (!target) { process.stderr.write(`no cron job: ${args[0]}\n`); process.exit(1); }
+      await store.remove(target.id);
+      process.stdout.write(`removed ${target.name}\n`);
+      return;
+    }
+    process.stderr.write("usage: node src/cli.js cron <list|define <name> <hours> <prompt>|tick [--force]|rm <name>>\n");
+    process.exit(2);
+  }
   if (cmd === "checkpoint") {
     // checkpoint list [dir] | checkpoint restore <seq> [dir] | checkpoint show <seq> [dir]
     const { CheckpointStore, resolveRoot } = await import("./checkpoint.js");
@@ -347,6 +520,28 @@ async function main() {
         process.exit(1);
       }
       process.stdout.write(`${JSON.stringify(row, null, 2)}\n`);
+      return;
+    }
+    if (sub === "prune") {
+      // prune deletes old snapshots; keep default 50, --keep=N to override
+      const keepIdx = args.indexOf("--keep");
+      const keep = keepIdx >= 0 ? Number(args[keepIdx + 1]) : 50;
+      const r = await store.prune({ keep: Number.isFinite(keep) ? keep : 50 });
+      process.stdout.write(
+        `pruned ${r.removed_manifests} snapshot(s), freed ${r.bytes_freed} bytes, kept ${r.kept}\n`,
+      );
+      return;
+    }
+    if (sub === "diff") {
+      // diff <fromSeq> <toSeq>: what changed between two snapshots
+      const from = Number(args[0]), to = Number(args[1]);
+      if (!Number.isFinite(from) || !Number.isFinite(to)) {
+        process.stderr.write("usage: node src/cli.js checkpoint diff <fromSeq> <toSeq> [dir]\n");
+        process.exit(2);
+      }
+      const d = await store.diff(from, to);
+      const fmt = (xs) => (xs.length ? xs.join("\n  ") : "(none)");
+      process.stdout.write(`added:\n  ${fmt(d.added)}\nmodified:\n  ${fmt(d.modified)}\nremoved:\n  ${fmt(d.removed)}\n`);
       return;
     }
     if (sub === "restore") {
@@ -419,7 +614,7 @@ async function main() {
   }
   process.stderr.write(
     `unknown subcommand: ${cmd}\n` +
-      "  replay <log> | stats <log> | checkpoint <list|show|restore> [dir] | memory <recall|stats|remember>\n",
+      "  replay <log> | stats <log> | checkpoint <list|show|restore|prune|diff> [dir] | memory <recall|stats|remember> | cron <list|define|tick|rm>\n",
   );
   process.exit(2);
 }

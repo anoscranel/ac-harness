@@ -2,6 +2,7 @@
 // match = error; multiple matches without replaceAll = error.
 import { readFile, writeFile } from "node:fs/promises";
 import { resolve } from "node:path";
+import { CheckpointStore, resolveRoot } from "../checkpoint.js";
 
 export const name = "edit";
 export const description =
@@ -23,6 +24,16 @@ export async function run(args, ctx = {}) {
   const cwd = ctx.cwd ?? process.cwd();
   const path = resolve(cwd, args.path);
 
+  // Snapshot before mutating: an edit rewrites in place and is otherwise
+  // unrecoverable. Best-effort, reported in the result.
+  let checkpoint = null;
+  try {
+    const store = new CheckpointStore({ root: resolveRoot(ctx.checkpointRoot), cwd });
+    const { seq } = await store.snapshot({ label: `pre-edit ${args.path}`, paths: [args.path] });
+    checkpoint = seq;
+  } catch (e) {
+    checkpoint = { error: String(e && e.message || e) };
+  }
   const original = (await readFile(path)).toString("utf8");
   const occurrences = original.split(args.oldString).length - 1;
   if (occurrences === 0) {
@@ -42,7 +53,7 @@ export async function run(args, ctx = {}) {
   const bytes = Buffer.byteLength(next, "utf8");
   // `path` rides the result payload: the loop's verify-gate tracks edited
   // files from here (F19).
-  return { ok: true, output: `edited ${path} (${occurrences} replacement(s))`, bytes, path };
+  return { ok: true, output: `edited ${path} (${occurrences} replacement(s))`, bytes, path, checkpoint };
 }
 
 export default { name, description, argsSchema, run };
