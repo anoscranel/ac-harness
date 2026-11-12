@@ -94,10 +94,12 @@ async function chat() {
   const rl = createInterface({ input: process.stdin, output: process.stdout, prompt: "> " });
 
   // REPL ask channel: prompt the user, 30s timeout (headless-timeout deny).
+  // v0.6.0 SR1: "a(lways)" writes an in-memory session rule (never disk) and
+  // answers allow — the next matching call short-circuits the ask entirely.
   const askResolver = (ask) =>
     new Promise((resolvePromise) => {
       process.stdout.write(
-        `\npolicy asks: allow ${ask.tool} ${JSON.stringify(ask.args)}? [y/N] (${ASK_TIMEOUT_MS / 1000}s) `,
+        `\npolicy asks: allow ${ask.tool} ${JSON.stringify(ask.args)}? [y/N/a(lways)] (${ASK_TIMEOUT_MS / 1000}s) `,
       );
       const timer = setTimeout(() => {
         process.stdout.write("\n(timeout → deny)\n");
@@ -105,7 +107,20 @@ async function chat() {
       }, ASK_TIMEOUT_MS);
       rl.question("", (answer) => {
         clearTimeout(timer);
-        resolvePromise(/^y(es)?$/i.test(answer.trim()) ? "allow" : "deny");
+        const t = answer.trim().toLowerCase();
+        if (t === "a" || t === "always") {
+          policy.addSessionRule({ tool: ask.tool });
+          log
+            .appendEvent("policy.rule.added", "policy", {
+              tool: ask.tool,
+              pattern: ask.args?.command ?? ask.args?.path ?? "*",
+              count: policy.listSessionRules().length,
+            })
+            .catch(() => {});
+          resolvePromise("allow");
+          return;
+        }
+        resolvePromise(/^y(es)?$/i.test(t) ? "allow" : "deny");
       });
     });
 
@@ -185,7 +200,13 @@ async function chat() {
                 });
                 process.stdout.write(`policy error (kept old rules): ${err.message}\n`);
               }
+            } else if (rest[0] === "clear") {
+              const n = policy.clearSessionRules();
+              process.stdout.write(`session rules cleared (${n})\n`);
             } else {
+              for (const r of policy.listSessionRules()) {
+                process.stdout.write(`  ${r.id}: ${r.effect} ${JSON.stringify(r.match)} (session, in-memory)\n`);
+              }
               for (const r of policy.rules) {
                 process.stdout.write(`  ${r.id}: ${r.effect} ${JSON.stringify(r.match)}\n`);
               }
@@ -289,6 +310,96 @@ async function main() {
     await replayCommand(resolve(rest[0]));
     return;
   }
+  if (cmd === "checkpoint") {
+    // checkpoint list [dir] | checkpoint restore <seq> [dir] | checkpoint show <seq> [dir]
+    const { CheckpointStore, resolveRoot } = await import("./checkpoint.js");
+    const sub = rest[0];
+    const [, ...args] = rest;
+    const dirFrom = (a) => {
+      const cand = a?.[a.length - 1];
+      return cand && !/^[0-9]+$/.test(cand) ? cand : process.cwd();
+    };
+    const store = new CheckpointStore({ root: resolveRoot(undefined), cwd: resolve(dirFrom(args)) });
+
+    if (sub === "list" || sub === undefined) {
+      const rows = await store.list();
+      if (!rows.length) {
+        process.stdout.write("no checkpoints for this directory\n");
+        return;
+      }
+      for (const r of rows) {
+        process.stdout.write(
+          `#${String(r.seq).padStart(4, "0")}  ${r.at}  ${String(r.files).padStart(4)} files  ${r.label || ""}\n`,
+        );
+      }
+      return;
+    }
+    if (sub === "show") {
+      const seq = Number(args[0]);
+      if (!Number.isFinite(seq)) {
+        process.stderr.write("usage: node src/cli.js checkpoint show <seq> [dir]\n");
+        process.exit(2);
+      }
+      const rows = await store.list();
+      const row = rows.find((r) => r.seq === seq);
+      if (!row) {
+        process.stderr.write(`no checkpoint #${seq}\n`);
+        process.exit(1);
+      }
+      process.stdout.write(`${JSON.stringify(row, null, 2)}\n`);
+      return;
+    }
+    if (sub === "restore") {
+      const seq = Number(args[0]);
+      if (!Number.isFinite(seq)) {
+        process.stderr.write("usage: node src/cli.js checkpoint restore <seq> [dir]\n");
+        process.exit(2);
+      }
+      // Deleting files created after the snapshot is irreversible, so it needs
+      // an explicit flag. Restoring is the safe half; pruning is the dangerous one.
+      const prune = args.includes("--prune");
+      const r = await store.restore(seq, { prune });
+      process.stdout.write(
+        `restored ${r.restored} file(s) from #${seq}` +
+          (prune ? `, pruned ${r.pruned}` : "") +
+          (r.skipped ? `, skipped ${r.skipped}` : "") +
+          "\n",
+      );
+      return;
+    }
+    process.stderr.write(
+      "usage: node src/cli.js checkpoint <list|show <seq>|restore <seq> [--prune]> [dir]\n",
+    );
+    process.exit(2);
+  }
+  if (cmd === "memory") {
+    // memory recall [query] | memory stats | memory remember <text>
+    const { Memory } = await import("./memory.js");
+    const m = new Memory({});
+    const sub = rest[0];
+    if (sub === "stats") {
+      const s = await m.stats();
+      process.stdout.write(`${s.live} live / ${s.total} total (${s.superseded} superseded)\n${s.path}\n`);
+      return;
+    }
+    if (sub === "remember") {
+      const text = rest.slice(1).join(" ");
+      if (!text) {
+        process.stderr.write("usage: node src/cli.js memory remember <text>\n");
+        process.exit(2);
+      }
+      const r = await m.remember(text);
+      process.stdout.write(`remembered ${r.id}\n`);
+      return;
+    }
+    const hits = await m.recall(rest.slice(1).join(" "));
+    if (!hits.length) {
+      process.stdout.write("no matching memory\n");
+      return;
+    }
+    for (const h of hits) process.stdout.write(`[${h.at.slice(0, 10)}] ${h.scope}: ${h.text}\n`);
+    return;
+  }
   if (cmd === "stats") {
     // v0.5.0 H6: what did this session spend? (pure report; no pricing)
     if (!rest[0]) {
@@ -306,7 +417,10 @@ async function main() {
     await chat();
     return;
   }
-  process.stderr.write(`unknown subcommand: ${cmd}\n`);
+  process.stderr.write(
+    `unknown subcommand: ${cmd}\n` +
+      "  replay <log> | stats <log> | checkpoint <list|show|restore> [dir] | memory <recall|stats|remember>\n",
+  );
   process.exit(2);
 }
 

@@ -25,7 +25,13 @@ import { ASK_TIMEOUT_MS } from "../policy.js";
  *   installs a temporary single-key handler; null restores normal composer keys
  * @param {number} [opts.timeoutMs] default ASK_TIMEOUT_MS (30s, matches the loop)
  */
-export function createAsk({ showBanner, clearBanner, setKeyHandler, timeoutMs = ASK_TIMEOUT_MS } = {}) {
+export function createAsk({
+  showBanner,
+  clearBanner,
+  setKeyHandler,
+  timeoutMs = ASK_TIMEOUT_MS,
+  onAlways = null, // v0.6.0 SR1: optional (ask:{tool,args}) => void — the surface persists the session rule
+} = {}) {
   if (typeof showBanner !== "function" || typeof setKeyHandler !== "function") {
     throw new Error("createAsk requires showBanner and setKeyHandler");
   }
@@ -55,15 +61,25 @@ export function createAsk({ showBanner, clearBanner, setKeyHandler, timeoutMs = 
         // (the loop serializes tool calls, but fail safe).
         if (pending) finish(undefined);
         const timer = setTimeout(() => finish(undefined), timeoutMs);
-        pending = { resolve: resolvePromise, timer };
+        pending = { resolve: resolvePromise, timer, ask }; // ask kept for the onAlways hook (SR1)
         active = true;
         showBanner(ask);
         setKeyHandler((key) => {
           if (key === "y" || key === "Y") finish("allow");
           else if (key === "n" || key === "N") finish("deny");
-          // "a"/"always": allowed single-key per spec §2, resolves allow for
-          // THIS ask only (spec §3.5 — no session rule API in v1).
-          else if (key === "a" || key === "A") finish("allow");
+          // "a"/"always": v0.6.0 SR1 — the surface's onAlways hook (if
+          // wired) persists the in-memory session rule; the answer stays
+          // allow for THIS ask. Without the hook the v1 behavior holds.
+          else if (key === "a" || key === "A") {
+            if (typeof onAlways === "function") {
+              try {
+                onAlways(pending.ask);
+              } catch {
+                /* a throwing persistence hook must not lose the answer */
+              }
+            }
+            finish("allow");
+          }
           else if (key === "\x03" || key === "\x04") finish("deny"); // ^C/^D during ask = deny, not quit (§3.4)
           // Other keys are ignored while an ask is pending (never crash, never quit).
         });

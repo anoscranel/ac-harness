@@ -31,7 +31,16 @@ export async function run(args, ctx = {}) {
     // F2 (review-r1): detached so the child leads its own process group;
     // abort/timeout kills the GROUP (-pid), with SIGKILL escalation after 2s,
     // and finish() waits for exit (bounded 500ms) before resolving.
-    const child = spawn("sh", ["-c", args.command], {
+    // v0.6.0 SR4 (F-D10.6): platform shell selection. On win32 there is no
+    // sh and no process-group signalling — cmd.exe /d /s /c (delays
+    // AutoRun extensions, strip-quote semantics, then the command) replaces
+    // sh -c; the 1 MiB caps + timeout + abort semantics below are unchanged
+    // (the platform kill path degrades to child.kill; the detached flag is
+    // already False on win32).
+    const onWindows = process.platform === "win32";
+    const shell = onWindows ? "cmd.exe" : "sh";
+    const shellArgs = onWindows ? ["/d", "/s", "/c", args.command] : ["-c", args.command];
+    const child = spawn(shell, shellArgs, {
       cwd: ctx.cwd ?? process.cwd(),
       stdio: ["ignore", "pipe", "pipe"],
       env: ctx.env ?? process.env,

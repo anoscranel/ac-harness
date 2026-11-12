@@ -116,6 +116,46 @@ export class Policy {
     this.logDir = dirname(this.logPath);
     this.cwd = cwd ?? process.cwd();
     this.rules = rules;
+    // v0.6.0 SR1: session-scoped consent rules. IN MEMORY ONLY — never
+    // written to disk by any path (no fs call touches them; listSnapshot is
+    // the /policy view). Consulted AFTER the pinned deny, so they can never
+    // widen the log-path deny.
+    this.#sessionRules = [];
+    this.#sessionSeq = 0;
+  }
+
+  #sessionRules;
+  #sessionSeq;
+
+  /**
+   * v0.6.0 SR1: add an in-memory session rule. `matchLike` is a partial
+   * match shape ({tool?, command_includes?, path_prefix?}); effect defaults
+   * to "allow" (the always-answer path) and overrides to "deny" keep the
+   * deny>ask>allow rank among session rules. Returns the generated rule id
+   * ("session:N" — also the rule_path a verdict cites).
+   */
+  addSessionRule(matchLike, effect = "allow") {
+    this.#sessionSeq += 1;
+    const id = `session:${this.#sessionSeq}`;
+    const match = {};
+    if (typeof matchLike?.tool === "string") match.tool = matchLike.tool;
+    if (typeof matchLike?.command_includes === "string") match.command_includes = matchLike.command_includes;
+    if (typeof matchLike?.path_prefix === "string") match.path_prefix = matchLike.path_prefix;
+    const rule = { id, effect: effect === "deny" ? "deny" : "allow", match };
+    this.#sessionRules.push(rule);
+    return id;
+  }
+
+  /** v0.6.0 SR1: clear every session rule (the /policy clear command). */
+  clearSessionRules() {
+    const n = this.#sessionRules.length;
+    this.#sessionRules = [];
+    return n;
+  }
+
+  /** v0.6.0 SR1: the /policy view — a COPY (mutation cannot reach the set). */
+  listSessionRules() {
+    return this.#sessionRules.map((r) => ({ ...r, match: { ...r.match } }));
   }
 
   /** Containment test: resolved p is the log file or inside the log dir. */
@@ -194,9 +234,23 @@ export class Policy {
    * @returns {{verdict:"allow"|"ask"|"deny", rule_path:string, violation?:object}}
    */
   evaluate(call) {
+    // SR1 ordering: PINNED first (session rules can never widen it), then
+    // SESSION rules (they are the user's freshest consent and outrank the
+    // static set — an "always" from THIS session beats a stale default ask),
+    // then the static rules. Zero matches anywhere = deny (fail closed).
     const violation = this.#pinnedViolation(call);
     if (violation) {
       return { verdict: "deny", rule_path: "pinned.deny_log_path", violation };
+    }
+    const sessionMatches = this.#sessionRules.filter((r) => ruleMatches(r, call));
+    if (sessionMatches.length > 0) {
+      sessionMatches.sort((a, b) => EFFECT_RANK[b.effect] - EFFECT_RANK[a.effect]);
+      const winner = sessionMatches[0];
+      if (winner.effect === "deny" || winner.effect === "allow") {
+        return { verdict: winner.effect, rule_path: winner.id };
+      }
+      // ("ask" session rules would be pointless — treat as no decision and
+      // fall through to the static set, same as today.)
     }
     const matches = this.rules.filter((r) => ruleMatches(r, call));
     if (matches.length === 0) {

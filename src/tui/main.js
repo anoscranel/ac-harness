@@ -92,6 +92,19 @@ async function main() {
     setKeyHandler: (h) => {
       askHandler = h;
     },
+    // v0.6.0 SR1: "always" writes an in-memory session rule (never disk) +
+    // the policy.rule.added event; the answer itself stays allow.
+    onAlways: (askArg) => {
+      if (!askArg) return;
+      policy.addSessionRule({ tool: askArg.tool });
+      log
+        .appendEvent("policy.rule.added", "policy", {
+          tool: askArg.tool,
+          pattern: askArg.args?.command ?? askArg.args?.path ?? "*",
+          count: policy.listSessionRules().length,
+        })
+        .catch(() => {});
+    },
   });
 
   // --- provider-admin §3: registry + panel ------------------------------------
@@ -465,9 +478,17 @@ async function main() {
           return;
         }
         case "/policy": {
-          const rows = policy.rules.map(
-            (r) => `  ${r.id}: ${r.effect} ${JSON.stringify(r.match)}`,
+          if (parsed.args[0] === "clear") {
+            const n = policy.clearSessionRules();
+            appendRows([`session rules cleared (${n})`]);
+            return;
+          }
+          const rows = policy.listSessionRules().map(
+            (r) => `  ${r.id}: ${r.effect} ${JSON.stringify(r.match)} (session, in-memory)`,
           );
+          for (const r of policy.rules) {
+            rows.push(`  ${r.id}: ${r.effect} ${JSON.stringify(r.match)}`);
+          }
           rows.push(`  pinned.deny_log_path: deny ${policy.logDir}`);
           appendRows(rows);
           return;

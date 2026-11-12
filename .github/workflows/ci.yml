@@ -1,0 +1,41 @@
+# .github/workflows/ci.yml — v0.6.0 SR2: run the test suite + ship-gate on a
+# plain runner matrix. The ONLY external runtime dependency is `rg` for the
+# grep tool + ship-gate's grep leg; the workflow pre-installs it where the
+# platform package manager is available and asserts graceful degradation
+# where it is not (the harness must stay green on a bare runner — F-D10.4).
+name: ci
+"on":
+  push:
+  pull_request:
+
+jobs:
+  test:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+      - name: ripgrep availability (grep tool dependency)
+        shell: bash
+        run: |
+          if command -v rg >/dev/null 2>&1; then
+            echo "rg present: $(rg --version | head -1)"
+          else
+            case "${RUNNER_OS}" in
+              Linux)  sudo apt-get update -y && sudo apt-get install -y ripgrep ;;
+              macOS)  brew install ripgrep ;;
+              *)      echo "rg not installable on ${RUNNER_OS} — the suite must still pass (grep tool degrades gracefully)" ;;
+            esac
+          fi
+      - name: syntax check (every src/test/scripts file)
+        run: node scripts/check.mjs
+      - name: tests
+        run: node --test
+      - name: ship-gate (DC6 + name-guard + zero-dep; rg-degrades if absent)
+        shell: bash
+        run: sh bench/ship-gate.sh

@@ -20,3 +20,4 @@
 {"seq":19,"ts":1771670400.041,"type":"turn.end","actor":"harness","data":{"turn":3,"reason":"complete","closed_calls":[]}}
 {"seq":20,"ts":1771670400.042,"type":"log.torn_tail","actor":"harness","data":{"skipped_lines":1,"first_skipped_seq":19}}
 {"seq":21,"ts":1771670400.043,"type":"session.warn","actor":"harness","data":{"kind":"budget","used":181,"cap":200,"fraction":0.905}}
+{"seq":22,"ts":1771670400.044,"type":"policy.rule.added","actor":"policy","data":{"tool":"bash","pattern":"echo *","count":1}}

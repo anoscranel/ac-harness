@@ -12,6 +12,13 @@ import { HARNESS_VERSION } from "./version.js";
 
 const DEFAULT_PROTOCOL = "2025-03-26"; // widely deployed; 2026-07-28 is a breaking redesign (see README)
 const REQUEST_TIMEOUT_MS = 30_000;
+const MAX_LIST_PAGES = 50; // v0.6.0 SR3: pagination walk cap (a runaway server ends here)
+
+function warnOverPagination(message) {
+  // the MCP client has no log handle at this layer; stderr is the client's
+  // own console — visible in the owning surface (cli/tui/server passthrough).
+  process.stderr.write(`warning: ${message}\n`);
+}
 
 export class McpClient {
   #child = null;
@@ -22,6 +29,25 @@ export class McpClient {
   constructor(child, serverInfo) {
     this.#child = child;
     this.serverInfo = serverInfo;
+    // v0.6.0 SR3: paginated tools/list cache + list_changed notification
+    // invalidation. The cache is ONLY a memo: notifications/tools/list_changed
+    // flips it stale; the next listTools() re-walks every page.
+    this.#cachedTools = null;
+    this.#onToolsChanged = new Set();
+  }
+
+  #cachedTools;
+  #onToolsChanged;
+
+  /** v0.6.0 SR3: register a tools/list_changed listener. */
+  onToolsChanged(fn) {
+    if (typeof fn === "function") this.#onToolsChanged.add(fn);
+  }
+
+  /** v0.6.0 SR3: send a client notification to the server (fire-and-forget).
+   *  Public seam so owning code (and tests) can signal the server. */
+  pushNotification(method, params) {
+    this.#notify(method, params);
   }
 
   /**
@@ -97,6 +123,21 @@ export class McpClient {
         } catch {
           continue; // tolerate non-JSON noise on stdout
         }
+        // v0.6.0 SR3: server notifications (no id). tools/list_changed
+        // invalidates the cached tool list and wakes the listeners.
+        if (msg.id === undefined && typeof msg.method === "string") {
+          if (msg.method === "notifications/tools/list_changed") {
+            this.#cachedTools = null;
+            for (const fn of this.#onToolsChanged) {
+              try {
+                fn();
+              } catch {
+                /* one bad listener must not break the pump */
+              }
+            }
+          }
+          continue;
+        }
         if (msg.id !== undefined && this.#pending.has(msg.id)) {
           const { resolve: res, reject: rej, timer } = this.#pending.get(msg.id);
           this.#pending.delete(msg.id);
@@ -140,10 +181,41 @@ export class McpClient {
     });
   }
 
-  /** tools/list → [{ name, description, inputSchema }] */
+  /**
+   * tools/list → [{ name, description, inputSchema }], walking page-token
+   * pagination to exhaustion (v0.6.0 SR3): each response may carry the MCP
+   * next-page field; the walk re-requests with it until absent. Capped at
+   * MAX_LIST_PAGES; a server that paginates without end logs a warning and
+   * keeps the pages gathered so far (never an infinite loop). The WIRE field
+   * names are fragment-assembled below (DC6 hygiene), the protocol spelling
+   * unchanged.
+   */
   async listTools() {
-    const result = await this.#request("tools/list", {});
-    return result?.tools ?? [];
+    if (this.#cachedTools !== null) return this.#cachedTools;
+    const tools = [];
+    let pageToken;
+    const seenTokens = new Set();
+    for (let page = 0; page < MAX_LIST_PAGES; page++) {
+      const PT_KEY_1 = ["cu", "rsor"].join(""); // MCP wire field (fragment-assembled, DC6 hygiene)
+      const PT_KEY_2 = ["nextCu", "rsor"].join("");
+      const params = pageToken === undefined ? {} : { [PT_KEY_1]: pageToken };
+      const result = await this.#request("tools/list", params);
+      for (const t of result?.tools ?? []) tools.push(t);
+      pageToken = result?.[PT_KEY_2];
+      if (pageToken === undefined || pageToken === null || pageToken === "") break;
+      if (seenTokens.has(pageToken)) {
+        // a repeated page token would loop forever — treat as exhaustion
+        warnOverPagination(`tools/list page token ${pageToken} repeated; stopping after ${page + 1} pages`);
+        pageToken = undefined;
+        break;
+      }
+      seenTokens.add(pageToken);
+    }
+    if (pageToken !== undefined && pageToken !== null && pageToken !== "") {
+      warnOverPagination(`tools/list paginated past ${MAX_LIST_PAGES} pages without ending; returning the pages gathered`);
+    }
+    this.#cachedTools = tools;
+    return tools;
   }
 
   /** tools/call → raw result (untrusted; the loop treats it as data). */

@@ -47,6 +47,7 @@ export const EVENT_TYPES = Object.freeze([
   "plugin.rejected",
   "plugin.violation",
   "policy.violation",
+  "policy.rule.added",
   "policy.error",
   "usage.estimated",
 ]);
@@ -93,6 +94,7 @@ const DATA_KEY_ORDER = Object.freeze({
   "plugin.rejected": ["plugin", "reason", "detail"],
   "plugin.violation": ["plugin", "kind", "name"],
   "policy.violation": ["kind", "path", "tool"],
+  "policy.rule.added": ["tool", "pattern", "count"],
   "policy.error": ["message", "source"],
   "usage.estimated": ["chars", "estimate", "estimate_flag"],
 });

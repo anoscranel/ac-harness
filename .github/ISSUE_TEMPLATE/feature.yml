@@ -1,0 +1,34 @@
+name: feature request
+description: A missing capability, with the use case that needs it.
+labels: ["enhancement"]
+body:
+  - type: textarea
+    id: use-case
+    attributes:
+      label: Use case — what are you trying to do?
+      description: The job to be done, not the mechanism you guess at.
+    validations:
+      required: true
+  - type: textarea
+    id: today
+    attributes:
+      label: What does today's harness do instead?
+      description: Current behavior + why it falls short.
+    validations:
+      required: true
+  - type: textarea
+    id: repro-context
+    attributes:
+      label: A failing scenario that would pass with the feature
+      description: The test that should exist — a feature with no test is a wish.
+      placeholder: |
+        given ... when ... then ...
+    validations:
+      required: true
+  - type: checkboxes
+    id: checks
+    attributes:
+      label: Preflight
+      options:
+        - label: I checked the README limitations + the backlog for an existing item
+          required: true

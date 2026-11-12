@@ -15,7 +15,7 @@ test("3.1 HARNESS_VERSION is the single source, equal to package.json.version", 
   const { HARNESS_VERSION } = await import("../src/version.js");
   const pkg = JSON.parse(readFileSync(join(ROOT, "package.json"), "utf8"));
   assert.equal(HARNESS_VERSION, pkg.version);
-  assert.match(HARNESS_VERSION, /^0\.5\.0$/);
+  assert.match(HARNESS_VERSION, /^0\.6\.0$/);
 });
 
 test("3.1 the four call sites import version.js (no literal survives)", () => {
@@ -40,7 +40,7 @@ test("3.1 the four call sites import version.js (no literal survives)", () => {
 
 test("3.2 bin: --version prints 0.4.0", () => {
   const out = execFileSync(process.execPath, [join(ROOT, "bin", "ac-harness.js"), "--version"], { encoding: "utf8" });
-  assert.match(out.trim(), /^0\.5\.0$/);
+  assert.match(out.trim(), /^0\.6\.0$/);
 });
 
 test("3.2 bin: replay <log> works through the dispatcher", { skip: false }, async () => {

@@ -31,7 +31,10 @@ export async function run(args, ctx = {}) {
 
   const hasPaging = args.offset !== undefined || args.limit !== undefined;
   if (hasPaging) {
-    const lines = text.split("\n");
+    // v0.6.0 SR4: CRLF-aware line splitting (Windows text files): the
+    // split honors CR so line CONTENT is platform-identical; the
+    // <lines N..M of T> marker keeps the Unix newline (JSON/log invariant).
+    const lines = text.includes("\r\n") ? text.split("\r\n") : text.split("\n");
     // trailing empty string after a final newline is not a line
     const total = text === "" ? 0 : text.endsWith("\n") ? lines.length - 1 : lines.length;
     const offset = Math.max(1, Math.floor(args.offset ?? 1));

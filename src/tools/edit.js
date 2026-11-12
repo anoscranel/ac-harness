@@ -20,7 +20,9 @@ export const argsSchema = {
 };
 
 export async function run(args, ctx = {}) {
-  const path = resolve(ctx.cwd ?? process.cwd(), args.path);
+  const cwd = ctx.cwd ?? process.cwd();
+  const path = resolve(cwd, args.path);
+
   const original = (await readFile(path)).toString("utf8");
   const occurrences = original.split(args.oldString).length - 1;
   if (occurrences === 0) {

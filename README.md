@@ -10,6 +10,21 @@ framework wrapper and never a model.
   checkpoint, the replay source, and the observability surface.
 - **Policy-gated:** rules-as-data; deny > ask > allow; zero matches = deny.
 
+## Capabilities beyond the loop
+
+- **Checkpoints** (`src/checkpoint.js`) — content-addressed snapshots taken
+  automatically before `write`/`edit`, so a destructive edit is recoverable.
+  `node src/cli.js checkpoint list|show|restore <seq> [--prune]`. Identical
+  content is stored once (blob dedup); a snapshot never captures the store
+  itself; deleting files created after a snapshot requires explicit `--prune`.
+- **Memory** (`src/memory.js`) — an append-only JSONL of atomic facts with
+  `supersedes`, shared across sessions. Tools `memory_recall` (allow) and
+  `memory_remember` (ask). Deliberately not a vector store: files stay auditable
+  and correct under update at desk scale.
+
+Both are zero-dependency and credited to Hermes' MIT-licensed design — no code
+copied. See `../hermes-features-2026-11.md` for the vendor-vs-rewrite decision.
+
 ## Architecture
 
 ```

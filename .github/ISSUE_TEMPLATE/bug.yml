@@ -1,0 +1,55 @@
+name: bug report
+description: Something is broken — reproduction required.
+labels: ["bug"]
+body:
+  - type: textarea
+    id: what-happened
+    attributes:
+      label: What happened?
+      description: The observed behavior vs what you expected.
+    validations:
+      required: true
+  - type: textarea
+    id: reproduction
+    attributes:
+      label: Reproduction steps
+      description: Exact commands/input that trigger it — a report without reproduction cannot be triaged.
+      placeholder: |
+        1. node src/cli.js
+        2. type ...
+        3. observe ...
+    validations:
+      required: true
+  - type: input
+    id: version
+    attributes:
+      label: Version
+      description: Output of `node bin/ac-harness.js --version`
+    validations:
+      required: true
+  - type: input
+    id: node
+    attributes:
+      label: Node version
+      description: Output of `node --version` (the harness requires >= 24)
+    validations:
+      required: true
+  - type: textarea
+    id: log-excerpt
+    attributes:
+      label: Event-log excerpt (safe fields only)
+      description: |
+        NEVER paste api key values — the harness stores env var NAMES only;
+        if a key-shaped string appears anywhere in your log, rotate the key.
+        ts/duration fields may be redacted; keep the seq/type/actor/data shape.
+    validations:
+      required: false
+  - type: checkboxes
+    id: checks
+    attributes:
+      label: Preflight
+      options:
+        - label: I ran `node scripts/check.mjs` and `node --test` and say what happened
+          required: true
+        - label: I checked SECURITY.md's unscreened-classes note before pasting anything
+          required: true
