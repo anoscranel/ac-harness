@@ -23,7 +23,60 @@ import { HARNESS_VERSION } from "./version.js";
  *  EVERY message kind in each range; strategy "summarise" replaces content
  *  with the events-span placeholder, "drop" removes it with a dropped marker.
  *  Nothing outside the ranges is touched. */
-function applyCompactionToMessages(messages, ranges, strategy) {
+/**
+ * v0.5.0 H2 (F-D3.2) — the EXTRACTIVE summariser. The old tombstone taught
+ * the model that SOMETHING existed, not WHAT. This is still deliberately
+ * extractive (not abstractive): no model call, no clock, no I/O — head,
+ * tail, error lines, and a re-read marker are COPIED from the original,
+ * so the run path and the resume path (which share this applier) produce
+ * byte-identical content and replay stays canonical.
+ * Output budget ≤600 chars on any input: 200 head + 200 tail + ≤5 error
+ * lines (each line capped so pathological lines cannot blow the budget)
+ * + the honest marker.
+ */
+function summariseExtractive(m, span) {
+  const original = typeof m.content === "string" ? m.content : String(m.content ?? "");
+  const HEAD = 200;
+  const TAIL = 200;
+  const MAX_ERR_LINES = 5; // card H2: keep every error line, capped at 5
+  const ERR_RE = /^\s*(\w+Error|error:|\u2717|FAIL|panic:|Exception)/;
+  const BUDGET = 600; // card acceptance: a 5 KB output compacts to ≤600 chars
+
+  const errLines = [];
+  for (const line of original.split("\n")) {
+    if (errLines.length >= MAX_ERR_LINES) break;
+    if (ERR_RE.test(line)) errLines.push(line.slice(0, 200));
+  }
+
+  const headSlice = original.length > 0 ? original.slice(0, HEAD) : "";
+  const tailSlice = original.length > HEAD + TAIL ? original.slice(-TAIL) : original.slice(Math.min(HEAD, original.length));
+  const marker = `<compacted: ${Buffer.byteLength(original, "utf8")} bytes \u2192 ${Math.min(original.length, HEAD + TAIL)} chars; events ${span}; re-read with read(offset,limit) or replay>`;
+
+  // Assemble in precedence order (head, errors, tail, marker), trimming the
+  // error lines to fit the 600-char budget exactly. Deterministic + pure.
+  const headPart = headSlice;
+  const tailPart = tailSlice ? "\n[\u2026tail]\n" + tailSlice : "";
+  const markerPart = "\n" + marker;
+  const remaining = Math.max(0, BUDGET - headPart.length - tailPart.length - markerPart.length);
+  const keptErrs = [];
+  let used = 0;
+  for (const l of errLines) {
+    if (!headPart.includes(l) && used + l.length + 1 <= remaining - "\n[errors]\n".length) {
+      keptErrs.push(l);
+      used += l.length + 1;
+    }
+  }
+  const errPart = keptErrs.length > 0 ? "\n[errors]\n" + keptErrs.join("\n") : "";
+
+  const parts = [];
+  if (headPart) parts.push(headPart);
+  if (errPart) parts.push(errPart);
+  if (tailPart) parts.push(tailPart);
+  parts.push(markerPart);
+  return parts.join("");
+}
+
+export function applyCompactionToMessages(messages, ranges, strategy) {
   // v0.4.0 1.6: compaction must not orphan tool_calls. Pass 1 marks content
   // as before; pass 2 detects assistant tool_calls INSIDE a compacted range
   // whose matching role:"tool" messages lie OUTSIDE it (or vice versa) and
@@ -63,13 +116,20 @@ function applyCompactionToMessages(messages, ranges, strategy) {
     const m = messages[i];
     if (!m) continue;
     const spanIdx = ranges?.find((r) => i >= r.start && i < r.end);
-    const span = spanIdx
-      ? `${spanIdx.event_log_span.first}..${spanIdx.event_log_span.last}`
-      : `${ranges?.[0]?.event_log_span.first ?? 0}..${ranges?.[0]?.event_log_span.last ?? 0}`;
+    // Desk fix (v0.5.0 verify): a plugin-supplied Decision may omit
+    // event_log_span (the seam is plugin-overridable and a plugin's malformed
+    // range would otherwise crash the turn OUTSIDE the decide() containment).
+    // Degrade to the range indices rather than throw.
+    const sp = spanIdx?.event_log_span ?? ranges?.[0]?.event_log_span;
+    const span = sp
+      ? `${sp.first}..${sp.last}`
+      : spanIdx
+        ? `${spanIdx.start}..${spanIdx.end}`
+        : "unknown";
     m.content =
       strategy === "drop"
-        ? `[dropped ${m.kind}; events ${span}]`
-        : `[compacted ${m.kind}; events ${span}]`;
+        ? `[dropped ${m.kind}; events ${span}]` // explicit loss (H2 keeps)
+        : summariseExtractive(m, span); // v0.5.0 H2: deterministic extractive summary
     // a compacted assistant with tool_calls drops its calls too — the TEXT
     // marker stands in; a surviving tool_calls without its tool result (or
     // vice versa) is the orphan defect 1.6 forbids, so partners always share
@@ -127,6 +187,19 @@ export function createLoop({
   // 6.1 (audit-a2): single-hook owner names for containment violations.
   const decidePlugin = hooks.decidePlugin ?? "unknown";
   const verifyGatePlugin = hooks.verifyGatePlugin ?? "unknown";
+
+  // v0.5.0 H1: budget enforcement (F-D12.5). cfg.budget.max_session_tokens
+  // is finally READ: crossing warn_fraction × cap emits ONE session.warn
+  // per session; reaching the cap emits session.error code:budget and ends
+  // the turn through the SAME finalize funnel with reason "budget". A budget
+  // of 0 or an absent budget disables both. No pricing (theta's call).
+  const budgetCap = Number.isFinite(cfg.budget?.max_session_tokens)
+    ? cfg.budget.max_session_tokens
+    : 0;
+  const warnFraction = Number.isFinite(cfg.budget?.warn_fraction)
+    ? cfg.budget.warn_fraction
+    : 0.9;
+  let budgetWarned = false; // one warn per session (flag-guarded)
 
   const state = {
     started: false,
@@ -524,6 +597,29 @@ export function createLoop({
       state.totalInput += u.input_tokens;
       state.totalOutput += u.output_tokens;
       state.lastUsage = { ...u, estimate: final.estimate === true };
+      // v0.5.0 H1: warn once past the fraction; halt at the cap.
+      if (budgetCap > 0) {
+        const used = state.totalInput + state.totalOutput;
+        if (!budgetWarned && used >= warnFraction * budgetCap) {
+          budgetWarned = true;
+          await log.appendEvent("session.warn", "harness", {
+            kind: "budget",
+            used,
+            cap: budgetCap,
+            fraction: used / budgetCap,
+          });
+        }
+        if (used >= budgetCap) {
+          await log.appendEvent("session.error", "harness", {
+            message: `session token budget reached (${used} >= ${budgetCap})`,
+            code: "budget",
+            used,
+            cap: budgetCap,
+          });
+          finalizeCtx.reason = "budget";
+          return { text: finalText, aborted: true, truncated: turnTruncated };
+        }
+      }
 
         const assistantSpan = {
           first: chunkSeqs[0] ?? turnStartEv.seq,
@@ -664,7 +760,7 @@ export function createLoop({
       input_tokens: state.lastUsage?.input_tokens ?? 0,
       cached_tokens: state.lastUsage?.cached_tokens ?? 0,
       output_reserve: cfg.output_reserve,
-      context_limit: cfg.context_limit,
+      context_limit: state.provider?.contextLimit ?? cfg.context_limit, // v0.5.0 H5
       estimate: state.lastUsage?.estimate ?? false,
     };
     const metas = state.messages.map((m) => ({

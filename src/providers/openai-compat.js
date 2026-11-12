@@ -104,6 +104,7 @@ export function createOpenAICompatProvider({
   sleepFn = defaultSleep, // injection seam for tests (fake clock)
   fetchFn = fetch, // injection seam for tests (fake endpoints)
   nowFn = Date.now, // injection seam for tests (fake window clock)
+  contextLimit, // v0.5.0 H5: optional per-provider context window (loop snapshot reads it)
 } = {}) {
   if (!baseUrl) throw new Error("openai-compat provider requires baseUrl");
   if (!model) throw new Error("openai-compat provider requires model");
@@ -355,7 +356,14 @@ export function createOpenAICompatProvider({
     }
   }
 
-  return { id, model, stream };
+  return {
+    id,
+    model,
+    stream,
+    ...(Number.isFinite(contextLimit) && contextLimit > 0
+      ? { contextLimit: Math.floor(contextLimit) }
+      : {}), // v0.5.0 H5: plain integer on the provider object
+  };
 }
 
 export default createOpenAICompatProvider;

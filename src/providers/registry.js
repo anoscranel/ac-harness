@@ -73,6 +73,8 @@ export function listEnvProviders(env) {
     if (typeof model === "string" && model !== "") entry.model = model;
     const apiKeyEnv = e[`${ENV_PREFIX}${id}${ENV_SUFFIX_API_KEY}`];
     if (typeof apiKeyEnv === "string" && apiKeyEnv !== "") entry.apiKeyEnv = apiKeyEnv;
+    const ctxLimit = Number(e[`${ENV_PREFIX}${id}_CONTEXT_LIMIT`]);
+    if (Number.isFinite(ctxLimit) && ctxLimit > 0) entry.contextLimit = Math.floor(ctxLimit);
     return entry;
   });
 }
@@ -88,12 +90,18 @@ export function buildFromEnv(entry, env) {
   if (!entry?.baseUrl) throw new Error("registry entry requires baseUrl");
   if (!entry?.model) throw new Error("openai-compat provider requires a model");
   const apiKey = entry.apiKeyEnv ? e[entry.apiKeyEnv] : undefined;
-  return createOpenAICompatProvider({
+  const provider = createOpenAICompatProvider({
     id: entry.id ?? "openai",
     baseUrl: entry.baseUrl,
     model: entry.model,
     apiKey,
   });
+  // v0.5.0 H5: threads the row's context limit into the provider object
+  // (read by the loop's compaction snapshot; absent → the DEFAULTS value).
+  if (Number.isFinite(entry.contextLimit) && entry.contextLimit > 0) {
+    provider.contextLimit = Math.floor(entry.contextLimit);
+  }
+  return provider;
 }
 
 /**
@@ -109,6 +117,10 @@ function rowOf(p) {
     model: String(p.model ?? ""),
     source: p.source === "env" ? "env" : "tui",
   };
+  // v0.5.0 H5: per-provider context limit (NOT a secret — stored plainly).
+  if (Number.isFinite(p.contextLimit) && p.contextLimit > 0) {
+    row.contextLimit = Math.floor(p.contextLimit);
+  }
   if (row.model === "") delete row.model; // env rows may be model-less
   if (typeof p.apiKeyEnv === "string" && p.apiKeyEnv !== "") row.apiKeyEnv = p.apiKeyEnv;
   return row;

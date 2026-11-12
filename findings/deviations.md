@@ -823,3 +823,100 @@ Applied MUST-FIX (F1, F9, F19), the SHOULD-FIX list, and the D items from
   Ship 3 `db7cf4e6c6674369e1de350b6222eec41db97161b5bad37d38d455debffab5e8`.
 - `node bin/ac-harness.js --version` → 0.4.0.
 - Not pushed (per card): the desk verifies; theta decides on push.
+
+## v0.5.0 "Honest Accounts" (2026-11-12)
+
+109. **H1/H2 red-first evidence** (budget-compaction.test.js written before
+    implementation; red recorded verbatim):
+    - H1: `AssertionError: exactly one budget warn (got 0)` — the budget
+      clause existed in DEFAULTS and nothing read it (F-D12.5 confirmed).
+    - H1 second case: `0 !== 1` same root.
+    - H2: `AssertionError: tool result was compacted with the new marker` —
+      the applier still emitted the `[compacted …]` tombstone (F-D3.2
+      confirmed). Red run: 6 tests, 3 pass (the disabled-budget + drop-
+      marker + cap-at-5 cases trivially pass today), 3 fail.
+
+## v0.5.0 "Honest Accounts" — H1..H6 completion (2026-11-12)
+
+110. **H1 — budget enforcement landed.** cfg.budget is finally read: after
+    usage accumulation, crossing warn_fraction×cap emits ONE
+    session.warn {kind:"budget", used, cap, fraction} (flag-guarded, once per
+    session); at/over the cap a session.error {code:"budget", used, cap}
+    lands and the turn ends through the SAME finalizeTurn funnel with reason
+    "budget" (no second exit path — the finalizeCtx mutation happens right
+    before the return; reason survives the funnel). Budget 0/absent =
+    disabled. total_cost_micro_usd stays 0 — no pricing invented. New event
+    session.warn registered (additive) + fixture line seq 21 {kind, used,
+    cap, fraction} canonical order; conformance extended by the suite's
+    existing fixture-coverage test (auto-enforced).
+111. **H2 — extractive summariser (honest name).** summariseExtractive()
+    replaces the tombstone for strategy "summarise": head 200 + tail 200 +
+    card-regex error lines (`^\s*(\w+Error|error:|✗|FAIL|panic:|Exception)`,
+    capped 5, each line sliced to 200) + `<compacted: N bytes → M chars;
+    events A..B; re-read with read(offset,limit) or replay>`, all inside a
+    600-char budget (fixed costs sized first, error lines fill the slack).
+    drop keeps the explicit-loss marker. Pure and deterministic: no model,
+    clock, or I/O — Buffer.byteLength is a pure function of the string.
+    Run path and resume path share the applier (byte-identical, asserted).
+    TENSION FOUND AND RESOLVED: the card's "≤600" and "cap 5 lines" and
+    "head 200 + tail 200" cannot all hold when error lines are long — the
+    fixed costs (~500) leave ~100 for the errors section, so the cap is an
+    UPPER bound and short lines fit all 5 (both cases pinned by tests).
+    Also: the card regex requires a word-prefix before "Error" (ValueError
+    matches; bare "Error0" does NOT — my first fixtures did not match; the
+    regex is the contract, fixtures fixed).
+112. **H2 — repair-3 legacy assertion updated.** The 6.2 test pinned the old
+    tombstone shape `[compacted assistant; events A..B]`; the card changes
+    that observable marker, so the legacy test was updated to the new
+    `<compacted: ...; events A..B; ...>` form (kinds still both present).
+113. **H3 — read paging + grep line cap.** read.js argsSchema gains offset
+    (1-based) + limit (default 2000, max 5000): line-sliced BEFORE the byte
+    cap; output ends `<lines N..M of T>`; the 256 KiB cap stays the outer
+    bound; no-args reads are byte-identical to today. grep.js appends
+    --max-columns 300 (args.max_columns clamped 80..1000) and sets
+    truncated:true when rg emits its `[Omitted long matching line]` marker.
+114. **H4 — per-session server chains.** session.prompt/cancel/events/
+    setProvider dispatch on a PER-SESSION chain (chainFor/setChain, cleared
+    on disconnect); session.create + unknown methods stay on the global
+    chain. SUBTLETY: a prompt for a NOT-YET-KNOWN session routes through the
+    GLOBAL chain so a pipelined prompt behind an in-flight create keeps the
+    old ordering guarantee (the create, also global, lands first —
+    otherwise the prompt could read the sessions map before the create
+    wrote it). Probe process note: spawn()'d children with RELATIVE script
+    paths fail silently from node -e evals (no cwd) — absolute paths only;
+    the deterministic test creates A (blocked provider) FIRST, acks, then
+    pipelines pA+pB+cC: pB answers in ~1.4s and cC lands while pA is still
+    (correctly) blocked. Acceptance met.
+115. **H5 — per-provider context limit.** contextLimit (plain integer, not a
+    secret) through the whole stack: rowOf whitelist, env discovery
+    (HARNESS_PROVIDER_<ID>_CONTEXT_LIMIT), buildFromEnv threads it onto the
+    provider object, openai-compat constructor option mirrors it, the loop
+    snapshot reads provider.contextLimit ?? cfg.context_limit (128000
+    default), and the TUI add/edit form gains a 5th field (integer optional,
+    blank = default; edit prefill carries the current value). The panel's
+    4-field legacy tests updated to the 5-field shape (this is the card's
+    intended observable change).
+116. **H6 — stats command.** src/stats.js (pure: parsed events → report:
+    turns, tokens with estimate flag, per-tool calls+ms, asks, compactions,
+    errors, wall-clock span from recorded ts; unknown types ignored; empty
+    → zeros; non-array input never throws). cli.js `stats <log>` prints it;
+    bin/ac-harness.js gains the stats subcommand. The card's
+    logs/live-smoke.jsonl golden log does not exist on disk (log residue is
+    policy-cleaned after every gate in this project); the fresh-session
+    end-to-end test covers the same contract (hand-counted against the
+    recorded turn.provider.response events).
+117. **Version 0.5.0** single-sourced via src/version.js (package.json
+    bumped; --version prints 0.5.0; version-bin pins updated).
+
+**v0.5.0 gate evidence (2026-11-12, node v24.18.0):**
+- `node scripts/check.mjs` → all files OK.
+- bare `node --test` → **233/233, 0 fail** (215 baseline-equivalent + 18
+  new: 7 budget-compaction core + 3 H3 + 1 H4 + 3 H5 + 4 stats; legacy
+  4-field panel pins and 0.4.0 version pins updated to the new contracts).
+- `sh bench/ship-gate.sh` → PASS ×3 consecutive (DC6, name-guard -rin,
+  zero-dep).
+- Determinism: fresh echo run + replay, run sha == replay sha =
+  `6e9bad591ad76efa71d135355247707e2d98a1062d278ad627a52adb048d8f04`;
+  the stats command reads the same log non-destructively. Log residue 0.
+- `node bin/ac-harness.js --version` → 0.5.0; `stats` subcommand smoke-run
+  on a fresh session log prints the full report.

@@ -17,6 +17,7 @@ export const argsSchema = {
     glob: { type: "string" },
     ignore_case: { type: "boolean" },
     max_results: { type: "integer" },
+    max_columns: { type: "integer", minimum: 80, maximum: 1000, description: "column cap (default 300)" },
   },
 };
 
@@ -44,6 +45,12 @@ export async function run(args, ctx = {}) {
     return { ok: false, error: "rg binary not found on PATH", output: "" };
   }
   const rgArgs = ["--line-number", "--no-heading", "--color", "never"];
+  // v0.5.0 H3: a single minified multi-MB line would pass the 1 MiB stdout
+  // cap whole; --max-columns cuts the LINE at the column budget (rg replaces
+  // the cut with '[Omitted long matching line]'; overridable via args,
+  // clamped 80..1000).
+  const maxCols = Math.max(80, Math.min(1000, Math.floor(args.max_columns ?? 300)));
+  rgArgs.push("--max-columns", String(maxCols));
   if (args.glob) rgArgs.push("--glob", args.glob);
   if (args.ignore_case) rgArgs.push("-i");
   if (args.max_results) rgArgs.push("--max-count", String(args.max_results));
@@ -77,7 +84,9 @@ export async function run(args, ctx = {}) {
       ctx.signal?.removeEventListener("abort", onAbort);
       // rg exit codes: 0 = matches, 1 = no matches, 2+ = error.
       if (code === 0 || code === 1) {
-        resolvePromise({ ok: true, output: out, bytes: Buffer.byteLength(out, "utf8"), truncated });
+        // v0.5.0 H3: --max-columns fired when rg emitted its omission marker.
+        const columnsTruncated = out.includes("[Omitted long matching line]");
+        resolvePromise({ ok: true, output: out, bytes: Buffer.byteLength(out, "utf8"), truncated: truncated || columnsTruncated });
       } else {
         resolvePromise({ ok: false, error: `rg exited ${code}: ${err.slice(0, 500)}`, output: out, truncated });
       }

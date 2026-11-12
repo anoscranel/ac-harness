@@ -127,13 +127,16 @@ test("6.2: step-3 summarise applies to assistant AND tool-result ranges", async 
       assert.equal(decided.data.reason, "pressure-plus-assistant");
       const applied = log.events.find((e) => e.type === "compaction.applied");
       assert.ok(applied);
-      // Every message kind in range got the placeholder — not just tool-result.
+      // Every message kind in range got compacted — not just tool-result.
+      // v0.5.0 H2: the marker changed from the lossy tombstone
+      // "[compacted <kind>; events A..B]" to the extractive summary with the
+      // "<compacted: ...; events A..B; ...>" tail. Both kinds appear.
       const kinds = loop.state.messages
-        .filter((m) => m.content.startsWith("[compacted "))
+        .filter((m) => /<compacted: .*events \d+\.\.\d+/.test(m.content ?? ""))
         .map((m) => m.kind);
       assert.ok(kinds.includes("assistant"), "assistant range compacted");
       assert.ok(kinds.includes("tool-result"), "tool-result range compacted");
-      assert.ok(loop.state.messages[1].content.match(/^\[compacted assistant; events \d+\.\.\d+\]$/));
+      assert.ok(/<compacted: .*events \d+\.\.\d+/.test(loop.state.messages[1].content ?? ""), "assistant content carries the new marker");
       return run;
     })());
   } finally {

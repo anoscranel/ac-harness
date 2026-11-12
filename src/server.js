@@ -215,7 +215,21 @@ async function main() {
     throw err;
   });
   const rl = createInterface({ input: process.stdin, crlfDelay: Infinity });
-  let chain = Promise.resolve(); // sequential method dispatch (see below)
+  let chain = Promise.resolve(); // GLOBAL chain: session.create + unknown methods (cheap, ordered)
+  // v0.5.0 H4 (F-D5.4): PER-SESSION chains. A session.prompt stuck in the
+  // provider's 24h endurance retry must not block EVERY other session — one
+  // chain per session keeps prompts of different sessions independent while
+  // same-session prompts stay ordered. The ask-answer fast path stays inline.
+  const sessionChains = new Map();
+  const chainFor = (sessionId) => {
+    let c = sessionChains.get(sessionId);
+    if (!c) {
+      c = Promise.resolve();
+      sessionChains.set(sessionId, c);
+    }
+    return c;
+  };
+  const setChain = (sessionId, next) => sessionChains.set(sessionId, next);
   for await (const line of rl) {
     const trimmed = line.trim();
     if (!trimmed) continue;
@@ -235,18 +249,43 @@ async function main() {
     }
     if (msg.method === undefined) continue;
     const id = msg.id;
-    // Methods dispatch through a sequential chain (session.create must land
-    // before a pipelined session.prompt). The policy.ask ANSWER path above is
-    // NOT a method: it resolves inline in this loop, so an in-flight prompt
-    // waiting on an ask never deadlocks the reader.
-    chain = chain
-      .then(() => handle(msg.method, msg.params))
-      .then((result) => {
-        if (id !== undefined) respond(id, result);
-      })
-      .catch((err) => {
-        if (id !== undefined) respondError(id, err.code ?? -32603, err.message);
-      });
+    // v0.5.0 H4: session-scoped methods (prompt/cancel/events/setProvider)
+    // run on THAT session's chain — a slow provider blocks only its own
+    // session. Launch/control methods (create, unknown) stay on the global
+    // chain (cheap, strictly ordered). The policy.ask ANSWER path above is
+    // NOT a method: it resolves inline, never deadlocking the reader.
+    const sessionScoped = msg.method === "session.prompt" ||
+      msg.method === "session.cancel" ||
+      msg.method === "session.events" ||
+      msg.method === "session.setProvider";
+    if (sessionScoped) {
+      // Sessions created so far run on their OWN chain. A session_id that
+      // does not exist yet is routed through the GLOBAL chain so a pipelined
+      // prompt for an in-flight session.create keeps the old ordering
+      // guarantee (the create, also global, lands first).
+      const sid = (msg.params?.session_id ?? [...sessions.keys()].at(-1)) ?? "__default__";
+      const known = sessions.has(sid);
+      const sc = known ? chainFor(sid) : chain;
+      const next = sc
+        .then(() => handle(msg.method, msg.params))
+        .then((result) => {
+          if (id !== undefined) respond(id, result);
+        })
+        .catch((err) => {
+          if (id !== undefined) respondError(id, err.code ?? -32603, err.message);
+        });
+      if (known) setChain(sid, next);
+      else chain = next;
+    } else {
+      chain = chain
+        .then(() => handle(msg.method, msg.params))
+        .then((result) => {
+          if (id !== undefined) respond(id, result);
+        })
+        .catch((err) => {
+          if (id !== undefined) respondError(id, err.code ?? -32603, err.message);
+        });
+    }
   }
 
   // F28: client disconnect = full cleanup. Sweep pending asks (they resolve
@@ -254,6 +293,7 @@ async function main() {
   for (const [, resolvePending] of pending) resolvePending(undefined);
   pending.clear();
   sessions.clear();
+  sessionChains.clear(); // v0.5.0 H4: no dangling chains after disconnect
 }
 
 if (import.meta.url === `file://${process.argv[1]}`) {

@@ -289,6 +289,19 @@ async function main() {
     await replayCommand(resolve(rest[0]));
     return;
   }
+  if (cmd === "stats") {
+    // v0.5.0 H6: what did this session spend? (pure report; no pricing)
+    if (!rest[0]) {
+      process.stderr.write("usage: node src/cli.js stats <log>\n");
+      process.exit(2);
+    }
+    const { readAll } = await import("./events.js");
+    const { buildReport, formatReport } = await import("./stats.js");
+    const events = await readAll(resolve(rest[0]));
+    const report = buildReport(events);
+    process.stdout.write(formatReport(report, { logPath: resolve(rest[0]) }) + "\n");
+    return;
+  }
   if (cmd === undefined) {
     await chat();
     return;

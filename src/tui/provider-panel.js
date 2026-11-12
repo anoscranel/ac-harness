@@ -49,17 +49,22 @@ export function validateField(field, value, { existingIds = [] } = {}) {
         return "key: this field wants an env var NAME (leave empty for no key) — a VALUE is never stored";
       }
       return null;
+    case "contextLimit": // v0.5.0 H5
+      if (v === "") return null; // blank = default 128k (explicitly fine)
+      if (!/^\d+$/.test(v) || Number(v) < 1) return "context limit: positive integer (or leave empty)";
+      return null;
     default:
       return null;
   }
 }
 
-export const FORM_FIELDS = ["id", "baseUrl", "model", "apiKeyEnv"];
+export const FORM_FIELDS = ["id", "baseUrl", "model", "apiKeyEnv", "contextLimit"]; // v0.5.0 H5
 export const FIELD_PROMPTS = Object.freeze({
   id: "id (lowercase [a-z0-9-])",
   baseUrl: "base URL (https://…)",
   model: "model (required)",
   apiKeyEnv: "api key ENV VAR NAME (leave empty for no key; a VALUE is never stored)",
+  contextLimit: "context limit in tokens (leave empty for the 128k default)",
 });
 
 /** Edit-mode prompt for the locked id field (spec §1: id is the stable key
@@ -166,7 +171,7 @@ export function createProviderPanel({ providers = [], activeId = "echo" } = {}) 
           rowSel = Math.min(visibleRows().length - 1, rowSel + 1);
           return { action: "none" };
         case "a": {
-          form = { fieldIdx: 0, values: { id: "", baseUrl: "", model: "", apiKeyEnv: "" }, error: null, editingId: null };
+          form = { fieldIdx: 0, values: { id: "", baseUrl: "", model: "", apiKeyEnv: "", contextLimit: "" }, error: null, editingId: null };
           notice = null;
           return { action: "form" };
         }
@@ -189,7 +194,8 @@ export function createProviderPanel({ providers = [], activeId = "echo" } = {}) 
               id: row.id,
               baseUrl: row.baseUrl ?? "",
               model: row.model ?? "",
-              apiKeyEnv: row.apiKeyEnv ?? "",
+              apiKeyEnv: String(row.apiKeyEnv ?? ""),
+              contextLimit: row.contextLimit !== undefined ? String(row.contextLimit) : "",
             },
             error: null,
             editingId: row.id,
@@ -259,6 +265,10 @@ export function createProviderPanel({ providers = [], activeId = "echo" } = {}) 
         model: form.values.model,
         source: "tui",
         ...(form.values[K] ? { [K]: form.values[K] } : {}),
+        // v0.5.0 H5: optional per-provider context limit (plain integer).
+        ...(form.values.contextLimit !== ""
+          ? { contextLimit: Number(form.values.contextLimit) }
+          : {}),
       };
       const action = form.editingId !== null ? "edit" : "submit";
       form = null;

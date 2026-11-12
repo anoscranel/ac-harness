@@ -97,20 +97,23 @@ test("a opens the add form; fields advance in order; submit emits a tui profile"
   p.openPanel();
   assert.equal(p.key("a").action, "form");
   assert.equal(p.formField, "id");
-  assert.deepEqual(FORM_FIELDS, ["id", "baseUrl", "model", "apiKeyEnv"]);
+  assert.deepEqual(FORM_FIELDS, ["id", "baseUrl", "model", "apiKeyEnv", "contextLimit"]);
   assert.equal(p.formSubmit("my-new").action, "none"); // id ok
   assert.equal(p.formField, "baseUrl");
   p.formSubmit("https://new.test/v1");
   assert.equal(p.formField, "model");
   p.formSubmit("gpt-x");
   assert.equal(p.formField, "apiKeyEnv");
-  const r = p.formSubmit("MY_KEY_NAME"); // optional — a NAME is fine
+  p.formSubmit("MY_KEY_NAME");
+  assert.equal(p.formField, "contextLimit"); // v0.5.0 H5: 5th field
+  const r = p.formSubmit("8000"); // optional — an integer or blank
   assert.equal(r.action, "submit");
   assert.deepEqual(r.profile, {
     id: "my-new",
     baseUrl: "https://new.test/v1",
     model: "gpt-x",
     apiKeyEnv: "MY_KEY_NAME",
+    contextLimit: 8000,
     source: "tui",
   });
   assert.equal(p.isOpen, true); // caller closes on success
@@ -123,9 +126,11 @@ test("empty apiKeyEnv submits a profile WITHOUT the field", () => {
   p.formSubmit("plain");
   p.formSubmit("https://p.test/v1");
   p.formSubmit("m");
-  const r = p.formSubmit("");
+  p.formSubmit(""); // apiKeyEnv blank
+  const r = p.formSubmit(""); // contextLimit blank (v0.5.0 H5) — final field
   assert.equal(r.action, "submit");
   assert.ok(!("apiKeyEnv" in r.profile));
+  assert.ok(!("contextLimit" in r.profile));
 });
 
 test("validation: bad id (charset, built-in, collision) refused", () => {
@@ -227,13 +232,15 @@ test("edit submit: id locked (typed input ignored); emits {action:\"edit\"} with
   assert.equal(p.formField, "baseUrl");
   p.formSubmit("https://v2.test/api");
   p.formSubmit("model-nine");
-  const res = p.formSubmit("MY_KEY_NAME");
+  p.formSubmit("MY_KEY_NAME");
+  const res = p.formSubmit("8000"); // v0.5.0 H5: 5th field finalizes
   assert.equal(res.action, "edit");
   assert.deepEqual(res.profile, {
     id: "my-endpoint", // NEVER the typed garbage — the locked id survived
     baseUrl: "https://v2.test/api",
     model: "model-nine",
     apiKeyEnv: "MY_KEY_NAME",
+    contextLimit: 8000,
     source: "tui",
   });
 });
@@ -246,7 +253,8 @@ test("edit submit: no-change edit is fine and emits the same profile", () => {
   p.formSubmit(""); // skip locked id
   p.formSubmit("https://tui.test/v1"); // same baseUrl
   p.formSubmit("m-8"); // same model
-  const res = p.formSubmit(""); // same (absent) apiKeyEnv
+  p.formSubmit(""); // same (absent) apiKeyEnv
+  const res = p.formSubmit(""); // v0.5.0 H5: contextLimit blank (absent — same)
   assert.equal(res.action, "edit");
   assert.deepEqual(res.profile, {
     id: "my-endpoint",
@@ -299,7 +307,8 @@ test("edit of an active provider with a changed model triggers setProvider with 
   p.formSubmit("");
   p.formSubmit("https://tui.test/v1");
   p.formSubmit("m-8-new");
-  const res = p.formSubmit("");
+  p.formSubmit(""); // apiKeyEnv
+  const res = p.formSubmit(""); // contextLimit (v0.5.0 H5) — final field
   assert.equal(res.action, "edit");
   // main.js rule: id === active → rebuild + setProvider
   if (p.activeId === res.profile.id) {

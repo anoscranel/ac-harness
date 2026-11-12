@@ -283,6 +283,9 @@ async function main() {
         baseUrl: profile.baseUrl,
         model: profile.model,
         ...(profile.apiKeyEnv ? { apiKeyEnv: profile.apiKeyEnv } : {}),
+        ...(profile.contextLimit !== undefined
+          ? { contextLimit: profile.contextLimit } // v0.5.0 H5
+          : {}),
       });
       if (row === null) {
         appendRows([`${style.red}provider ${profile.id} not found in profiles${style.reset}`]);
