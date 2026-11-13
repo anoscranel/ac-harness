@@ -133,9 +133,24 @@ async function chat() {
       : "\x1b[2mno provider configured \u2014 using echo (offline); add one via the TUI ? panel or HARNESS_PROVIDER_<ID>_BASE_URL env vars\x1b[0m\n",
   );
 
+  // v0.10.0 S1b: MCP tools arrive at session start via the bridge. The
+  // spawn is policy-gated inside McpClient.connect; every mcp.<server>.<tool>
+  // call lands on defaults.ask_mcp; a dead server logs mcp.server.error and
+  // contributes zero tools (the session starts with the rest). No
+  // mcp.config.json declared = a bare builtin registry = today's behaviour.
+  const mcpConfigPath = resolve(repoRoot, "mcp.config.json");
+  const hasMcp = await import("node:fs/promises").then(
+    (f) => f.access(mcpConfigPath).then(() => true, () => false),
+  );
+  const { buildRegistryWithMcp } = await import("./mcp-bridge.js");
+  const mcpSide = await buildRegistryWithMcp(createRegistry,
+    hasMcp
+      ? { configPath: mcpConfigPath, policy, log, askResolver, warn: (m) => process.stderr.write(`${m}\n`) }
+      : {});
+
   const loop = createLoop({
     provider,
-    tools: createRegistry(),
+    tools: mcpSide.registry,
     policy,
     log,
     // TB0: a plugin's compaction-trigger single-hook winner replaces the
@@ -269,6 +284,7 @@ async function chat() {
     // Drain the queue before ending so an in-flight turn is not killed.
     queue.then(async () => {
       await loop.end();
+      await mcpSide.closeMcp(); // v0.10.0 S1b: MCP connections close before exit
       process.stdout.write(`\nsession ended; canonical sha256: ${log.canonicalSha256()}\n`);
       process.exit(0);
     });
@@ -397,10 +413,22 @@ async function main() {
     // unattended run fails closed and keeps going, it does not wait for a
     // human who is not there.
     const askResolver = async (ask) => ({ action: "deny", reason: "headless: no human to ask" });
+    let closeMcpOnExit = async () => {};
     const decide = (await import("./context.js")).decide;
+    const { buildRegistryWithMcp } = await import("./mcp-bridge.js");
+    const runRepoRoot = resolve(new URL("..", import.meta.url).pathname);
     const loop = createLoop({
       provider,
-      tools: createRegistry(),
+      tools: await buildRegistryWithMcp(createRegistry, {
+        configPath: resolve(runRepoRoot, "mcp.config.json"),
+        policy,
+        log,
+        askResolver: async () => "deny", // headless run: no human, fail closed
+        warn: (m) => process.stderr.write(`${m}\n`),
+      }).then((r) => {
+        closeMcpOnExit = r.closeMcp;
+        return r.registry;
+      }),
       policy,
       log,
       decide,
@@ -415,6 +443,8 @@ async function main() {
       failed = true;
       process.stderr.write(`run error: ${e && e.message}\n`);
     }
+    await loop.end();
+    await closeMcpOnExit(); // v0.10.0 S1b: MCP connections close before exit
     const st = loop.state;
     const out = {
       session: sessionId,

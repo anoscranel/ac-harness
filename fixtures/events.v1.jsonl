@@ -21,3 +21,4 @@
 {"seq":20,"ts":1771670400.042,"type":"log.torn_tail","actor":"harness","data":{"skipped_lines":1,"first_skipped_seq":19}}
 {"seq":21,"ts":1771670400.043,"type":"session.warn","actor":"harness","data":{"kind":"budget","used":181,"cap":200,"fraction":0.905}}
 {"seq":22,"ts":1771670400.044,"type":"policy.rule.added","actor":"policy","data":{"tool":"bash","pattern":"echo *","count":1}}
+{"seq":23,"ts":1771670400.045,"type":"mcp.server.error","actor":"harness","data":{"server":"local-tools","reason":"spawn failed: ENOENT"}}

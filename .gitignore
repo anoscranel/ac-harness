@@ -7,4 +7,7 @@ plugins.config.json
 # Per-user local provider profiles (baseUrl + model plain, keys referenced by
 # env var NAME only — provider-admin §2) — never commit.
 providers.config.json
+# Per-user local MCP server declarations (env NAMES only via envFrom —
+# never inline values) — never commit.
+mcp.config.json
 node_modules/

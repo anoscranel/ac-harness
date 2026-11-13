@@ -238,6 +238,37 @@ store for this project exceeds 32 MiB (override with
 `AC_BASH_SNAPSHOT_MAX_BYTES`), the snapshot is **skipped with a reported
 reason** rather than stalling — the run still proceeds.
 
+## MCP tools in sessions + ACP session/load (v0.10.0)
+
+**Declaring MCP servers.** `mcp.config.json` at the repo root (gitignored),
+shape `{version:1, servers:{"<name>":{command, args?, envFrom?, enabled?}}}`, name matching
+`^[a-z0-9][a-z0-9-]*$` (it becomes the tool namespace). Env values are
+NEVER accepted inline — `envFrom` is a list of env-var NAMES the bridge
+reads from the process env at spawn time; an inline `env` object in a config
+is a rejected entry. Malformed entries are dropped with a warning; a missing
+file declares zero servers.
+
+At session start (the REPL, headless `run`, and the JSON-RPC server) every
+enabled server is connected via the policy-gated spawn: its tools arrive as
+`mcp.<server>.<tool>` — every call gates on `defaults.ask_mcp` (ask by
+default), and the pinned log-path deny applies to MCP calls by name. A server
+that fails to start, crashes, or exits before initialize logs
+`mcp.server.error {server, reason}`, contributes zero tools, and the session
+starts with the rest. Connections close at session end. Stdio only; local
+servers only.
+
+`ac-harness tools` — a read-only listing: builtins first, then every
+`mcp.<server>` group. Run from a session directory to see connected tools;
+run without one to see the declared servers. No other behaviour.
+
+**ACP `session/load`.** `{sessionId, logPath?}` loads a past session backed
+BY THE EVENT LOG (the log is the store; `resume()` is the path). The
+response carries the descriptor AND the limits, stated because they are real:
+the load reconstructs the transcript and turn state only; policy session
+rules (`always` allowances) are per-process and are **not** restored; tools
+are never re-run; a log with a torn tail loads to its last intact event.
+A log that does not exist is a JSON-RPC error naming the path tried.
+
 ## Zero-dependency statement
 
 **Preflight, honestly:** the actual minimum is **Node >= 24** (the code uses

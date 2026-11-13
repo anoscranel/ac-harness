@@ -163,7 +163,7 @@ test("ACP: session/cancel mid-turn aborts cleanly (stopReason cancelled)", { tim
   }
 });
 
-test("ACP: one protocol per process — session/load is a hard -32602 (no session store)", { timeout: 45_000 }, async () => {
+test("ACP: session/load without a live session is a -32602 (one session per process first)", { timeout: 45_000 }, async () => {
   const dir = await mkdtemp(join(tmpdir(), "acp3d-"));
   const child = spawn(process.execPath, [ACP], {
     cwd: dir,
@@ -174,10 +174,14 @@ test("ACP: one protocol per process — session/load is a hard -32602 (no sessio
   try {
     stub.send(1, "initialize", {});
     await waitForResponse(stub, 1);
+    // v0.10.0 S2: session/load is IMPLEMENTED (log-backed). Without
+    // session/new the process still RESOLVES the log first — so an unknown
+    // sessionId reports the NOT-FOUND path (the resolution precedes the
+    // live-session requirement; both are -32602 with legible reasons).
     stub.send(2, "session/load", { sessionId: "anything" });
     const load = await waitForResponse(stub, 2);
     assert.equal(load.error.code, -32602);
-    assert.match(load.error.message, /no ACP session store/);
+    assert.match(load.error.message, /log not found \(tried .+anything\.jsonl\)/);
   } finally {
     child.kill("SIGKILL");
   }

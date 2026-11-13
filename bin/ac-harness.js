@@ -65,6 +65,15 @@ switch (cmd) {
     process.exit(r.exitCode);
     break;
   }
+  case "tools": { // v0.10.0 S1c: read-only tool listing (builtin + mcp groups)
+    const { toolsCommand } = await import(join(root, "src", "tools-list-cli.js"));
+    // v0.10.0 S1c: the config is OPERATOR-OWNED and lives in the project
+    // directory being worked on (cwd), like cron's store — not the bin dir.
+    const { resolve } = await import("node:path");
+    const r = await toolsCommand(rest, { stdout: process.stdout, configPath: resolve(process.cwd(), "mcp.config.json") });
+    process.exit(r.exitCode);
+    break;
+  }
   case "stats": // v0.5.0 H6
     if (!rest[0]) {
       process.stderr.write("usage: ac-harness stats <log>\n");

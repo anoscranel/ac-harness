@@ -85,13 +85,31 @@ export class McpClient {
       stdio: ["pipe", "pipe", "inherit"],
       detached: process.platform !== "win32",
     });
+    // v0.10.0 S1b: a failed spawn surfaces ONLY as an async 'error' event
+    // (ENOENT etc.) — an unhandled one crashes the PARENT process. The
+    // connectError promise below rejects before any await so connect()'s
+    // caller (the bridge's failure isolation) can do its job.
+    const connectError = new Promise((_, rejectConnect) => {
+      child.once("error", (e) => rejectConnect(new Error(`spawn failed: ${e.code ?? e.message}`)));
+      child.once("close", (code) => {
+        if (code !== null && code !== 0) {
+          rejectConnect(new Error(`server exited before initialize (code ${code})`));
+        }
+      });
+    });
     const client = new McpClient(child, null);
     client.#pump();
 
-    const init = await client.#request("initialize", {
-      protocolVersion,
-      capabilities: {},
-      clientInfo: { name: "ac-harness", version: HARNESS_VERSION },
+    const init = await Promise.race([
+      client.#request("initialize", {
+        protocolVersion,
+        capabilities: {},
+        clientInfo: { name: "ac-harness", version: HARNESS_VERSION },
+      }),
+      connectError,
+    ]).catch((e) => {
+      try { client.close(); } catch { /* already dead */ }
+      throw e;
     });
     client.serverInfo = init?.serverInfo ?? null;
     client.#notify("notifications/initialized", {});

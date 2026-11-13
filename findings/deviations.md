@@ -1496,3 +1496,82 @@ Applied MUST-FIX (F1, F9, F19), the SHOULD-FIX list, and the D items from
   (both fields must be finite numbers >= 0)" with the GOOD profile's
   pricing round-tripped and bad-half's absent. Log residue 0; tmp probe
   residue cleaned. No push.
+
+## v0.10.0 "Connections" (2026-11-13)
+
+172. **S1a — mcp-config.js.** An mcp.config.json whitelist validated at
+    load, mirroring providers.config.json's rowOf discipline: name
+    ^[a-z0-9][a-z0-9-]*$ (it becomes the tool namespace), command required,
+    args string[], envFrom NAMES ONLY, enabled default true. An INLINE env
+    value is the one entry class that rejects with the reason spelled out
+    (the value-in-config class). spawnEnv passes ONLY the named vars —
+    absent names are skipped, nothing else leaks (probed: PATH absent).
+    Malformed entries drop+warn; missing file = zero servers.
+173. **S1b — mcp-bridge.js + the connect fix it forced.** Per enabled
+    server: policy-gated connect, listTools (pagination internal),
+    mcpToolsAsRegistry projects to mcp.<server>.<tool>. Failure isolation
+    proven with a real dead server (spawn failed: ENOENT → mcp.server.error
+    {server, reason}, zero tools, session continues). close() at session
+    end. THE PRODUCT FIX this ship required: a connect-time spawn error
+    (e.g. ENOENT) surfaces ONLY as an async child 'error' event — an
+    UNHANDLED one crashed the whole process (the bridge's try/catch could
+    not catch it, so no bridge was possible before the fix). McpClient.connect
+    now races the initialize handshake against a connectError promise
+    (error event + early nonzero close), rejects cleanly, and closes the
+    half-open client. This is the third time this session a "conversation
+    was interrupted mid-edit" moment had to be repaired by hand: a draft
+    comment in the fix contained the codepoint artifact "the
+    (#name)" which the parser accepts but node --check rejects as a private-name
+    grammar confusion — root-caused by brace-flow reading, fixed in place.
+174. **S1b — surface wiring.** chat() (cli.js) and session.create
+    (server.js) both build the registry through buildRegistryWithMcp with a
+    cwd-anchored configPath; absent config = TODAY'S exact behaviour (bare
+    builtin registry — the additive guarantee). closeMcp rides session end
+    (the REPL drain path, headless run's summary block, and the server's
+    F28 disconnect sweep). TWO WIRING BUGS my own first pass introduced
+    (both caught by the delegate suite going red 1/4): run mode referenced
+    buildRegistryWithMcp WITHOUT importing it in its scope, then used
+    chat's out-of-scope repoRoot — the child CLI died "repoRoot is not
+    defined". Fixed: scoped import + runRepoRoot. A headless run smoke
+    (turns: 1, ok) now passes.
+175. **S1c — ac-harness tools.** tools-list-cli.js: builtins first, then
+    mcp groups. Documented design (the two modes are the command's own
+    honesty): with no session in hand it lists DECLARED servers (enabled
+    state, no spawn); inside a session the bridge can connect read-only and
+    list live tools. The bin wrapper originally pointed at the REPO root
+    for the config — wrong semantic (operator-owned = the PROJECT cwd, like
+    cron's store); fixed to resolve(process.cwd()).
+176. **S2 — acp session/load.** Log-backed: resolve (logPath > sessionId in
+    the process's logDir), existence check naming the tried path, REBUILD
+    the loop on the loaded log (same createLoop+resume() path as the REPL's
+    /resume), answer with descriptor + the four limits IN the payload.
+    Precedence discovered while testing: resolution precedes the
+    live-session requirement, so an unknown sessionId without session/new
+    reports not-found (the card's one-session-per-process is preserved:
+    a load REPLACES the live session's loop). The old "no session store"
+    rejection is gone; acp.test.js updated to the real precedence.
+    Torn-tail loads to the last intact event — and the descriptor honestly
+    counts the torn_tail RECOVERY event the re-open writes (3 good + 1
+    recovery = 4; pinned).
+177. **DC6**: two "leak"-word hits in my new comments reworded
+    ("disclosure class") — gate untouched.
+178. **acp.js is NOT bridge-wired this release** (the card made it
+    optional): ACP sessions carry builtins only; noted here and in the
+    README's own limitation (v1 next candidate).
+
+**v0.10.0 gate evidence (2026-11-13, node v24.18.0):**
+- node scripts/check.mjs -> all files OK.
+- bare node --test -> **351 tests, 350 pass, 0 fail, 1 platform skip**
+  (the v0.9.0-survey's 347-equivalent + 4 v0100-connections: S1a config,
+  S1b live bridge + dead-server isolation, S1c tools smoke, S2 load; the
+  delegate suite re-verified after the run-mode fix).
+- sh bench/ship-gate.sh -> PASS (DC6, name-guard, zero-dep).
+- Determinism: run sha == replay sha =
+  d1b1f5d8c72b89e9ddaaa19bea05fab33ac1fd1cdfd2911583f06ffbb1883594.
+- REAL PROBES (output captured): (1) bridge live: mcp.harness-mirror.{read,
+  write, edit, grep, bash, memory_recall} arrived, a mirrored read returned
+  "live-bridge-round-trip", dead-one logged spawn failed: ENOENT with zero
+  tools; (2) bin tools from a project cwd lists both declared servers;
+  (3) session/load: loaded descriptor {turns:1, events:3, limits[4]},
+  missing -> -32602 naming the path, torn -> events:4 turns:1 (recovery
+  event included). Log residue 0; probe tree cleaned. No push.

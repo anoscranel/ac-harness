@@ -128,9 +128,21 @@ async function createSession(params) {
   // Single-hook winners override the built-in decide / verify gate.
   const wired = await wirePluginHooks(pluginHost, log, { config: params?.pluginConfig ?? {} });
 
+  // v0.10.0 S1b: MCP tools arrive per session via the bridge (the spawn is
+  // policy-gated inside connect; per-session clients close with the session).
+  const mcpConfigPath = resolve(REPO_ROOT, "mcp.config.json");
+  const hasMcp = await import("node:fs/promises").then(
+    (f) => f.access(mcpConfigPath).then(() => true, () => false),
+  );
+  const { buildRegistryWithMcp } = await import("./mcp-bridge.js");
+  const mcpSide = await buildRegistryWithMcp(createRegistry,
+    hasMcp
+      ? { configPath: mcpConfigPath, policy, log, askResolver, warn: (m) => process.stderr.write(`${m}\n`) }
+      : {});
+
   const loop = createLoop({
     provider,
-    tools: createRegistry(),
+    tools: mcpSide.registry,
     policy,
     log,
     decide: wired.decide ?? decide,
@@ -146,7 +158,7 @@ async function createSession(params) {
     },
   });
 
-  const session = { loop, log, pluginHost, subscribers: new Set() };
+  const session = { loop, log, pluginHost, subscribers: new Set(), closeMcp: mcpSide.closeMcp }; // v0.10.0 S1b: MCP close per session
   log.on("event", (ev) => {
     for (const cb of session.subscribers) cb(ev);
   });
@@ -292,6 +304,9 @@ async function main() {
   // undefined → headless-timeout deny) and drop all sessions.
   for (const [, resolvePending] of pending) resolvePending(undefined);
   pending.clear();
+  for (const [, sess] of sessions) {
+    try { await sess.closeMcp?.(); } catch { /* dead: already settled */ }
+  } // v0.10.0 S1b: close every session's MCP clients at disconnect
   sessions.clear();
   sessionChains.clear(); // v0.5.0 H4: no dangling chains after disconnect
 }

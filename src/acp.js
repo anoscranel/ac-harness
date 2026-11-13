@@ -105,9 +105,64 @@ export async function serveAcp({
         respond(id, { sessionId });
         break;
       }
-      case "session/load":
-        respondError(id, -32602, "session/load unsupported: the harness has no ACP session store (spec §2)");
+      case "session/load": {
+        // v0.10.0 S2: the event log IS the session store. Load = resolve the
+        // log, replay it through the same resume() path (torn tail tolerated
+        // to the last intact event), answer with the descriptor + the honest
+        // limits. Not-found = an error naming the tried path.
+        let candidate;
+        if (typeof msg.params?.logPath === "string" && msg.params.logPath !== "") {
+          candidate = resolve(msg.params.logPath);
+        } else if (typeof msg.params?.sessionId === "string" && msg.params.sessionId !== "") {
+          candidate = resolve(logDir.replace(/[\\/]$/, ""), `${msg.params.sessionId}.jsonl`);
+        } else {
+          respondError(id, -32602, "session/load requires sessionId or logPath");
+          break;
+        }
+        const { readFile: rf } = await import("node:fs/promises");
+        try {
+          await rf(candidate, "utf8");
+        } catch {
+          respondError(id, -32602, `session/load: log not found (tried ${candidate})`);
+          break;
+        }
+        // one ACP session per process: a load REPLACES the live session's
+        // state (the old loop's log stays on disk; this process now serves
+        // the loaded transcript).
+        const { readAll } = await import("./events.js");
+        // One ACP session per process: a load points the LIVE session at the
+        // loaded transcript. The loop is rebuilt ON THE LOADED LOG (same
+        // createLoop + resume() path as the REPL's /resume) so the streamed
+        // continuation carries the loaded context.
+        const loadedLog = await EventLog.open(candidate);
+        const loadedPolicy = new Policy({ rules: defaultRules(), logPath: candidate });
+        loop = createLoop({
+          provider: echo,
+          tools: registry,
+          policy: loadedPolicy,
+          log: loadedLog,
+          decide,
+          askResolver: async () => "deny",
+          config: { session: msg.params?.sessionId ?? candidate, harness_version: HARNESS_VERSION },
+        });
+        await loop.resume(); // v0.10.0 S2: the SAME resume() path as the REPL
+        const evs = await readAll(candidate);
+        const turns = evs.filter((e) => e.type === "turn.start").length;
+        respond(id, {
+          sessionId: msg.params?.sessionId ?? candidate,
+          log: candidate,
+          turns,
+          events: evs.length,
+          stopped_at: evs.filter((e) => e.type === "session.end").length > 0,
+          limits: [
+            "transcript + turn state only",
+            "policy session-rules are per-process and NOT restored",
+            "tools are never re-run",
+            "a torn tail loads to the last intact event",
+          ],
+        });
         break;
+      }
       case "session/prompt": {
         const text = msg.params?.prompt ?? "";
         if (!loop) { respondError(id, -32602, "no session: call session/new first"); break; }
