@@ -388,13 +388,21 @@ test("H4: a blocked prompt on one session does not block another session or sess
   const logA = join(root, "logs", "h4-A.jsonl");
   const child = spawn(process.execPath, [join(root, "src", "server.js")], { stdio: ["pipe", "pipe", "pipe"] });
   const seen = new Map();
+  let childBuf = "";
   child.stdout.on("data", (d) => {
-    for (const l of d.toString().split("\n")) {
-      if (!l.trim()) continue;
+    // v0.10.0 repair: buffer ACROSS chunk boundaries — a JSON line split by
+    // a chunk edge used to parse-fail and DROP the ack permanently (seen in
+    // a loaded full-suite run: "create A acked" never arrived).
+    childBuf += d.toString();
+    let nl;
+    while ((nl = childBuf.indexOf("\n")) >= 0) {
+      const l = childBuf.slice(0, nl).trim();
+      childBuf = childBuf.slice(nl + 1);
+      if (!l) continue;
       try {
         const m = JSON.parse(l);
         if (m.id !== undefined) seen.set(m.id, m);
-      } catch { /* partial line */ }
+      } catch { /* tolerate partial */ }
     }
   });
   const send = (id, method, params) =>
@@ -404,10 +412,10 @@ test("H4: a blocked prompt on one session does not block another session or sess
     // loop blocks its prompt chain). Wait for the create ACK before pA so
     // the ordering is deterministic (A is the recorded session from there on).
     send("createA", "session.create", { session: "H4-A", provider: "openai-compat", baseUrl: "https://127.0.0.1:1/v1", model: "m", logPath: logA });
-    for (let i = 0; i < 100 && !seen.has("createA"); i++) await waitMs(50);
+    for (let i = 0; i < 200 && !seen.has("createA"); i++) await waitMs(100);
     assert.ok(seen.has("createA"), "create A acked");
     send("createB", "session.create", { session: "H4-B" });
-    for (let i = 0; i < 100 && !seen.has("createB"); i++) await waitMs(50);
+    for (let i = 0; i < 200 && !seen.has("createB"); i++) await waitMs(100);
     assert.ok(seen.has("createB"), "create B acked");
 
     // pA blocks (its provider retries against a refused socket). pB and cC

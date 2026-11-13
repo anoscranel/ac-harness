@@ -130,7 +130,7 @@ async function createSession(params) {
 
   // v0.10.0 S1b: MCP tools arrive per session via the bridge (the spawn is
   // policy-gated inside connect; per-session clients close with the session).
-  const mcpConfigPath = resolve(REPO_ROOT, "mcp.config.json");
+  const mcpConfigPath = (await import("./mcp-config.js")).repoMcpConfigPath(); // S4-1: single source
   const hasMcp = await import("node:fs/promises").then(
     (f) => f.access(mcpConfigPath).then(() => true, () => false),
   );

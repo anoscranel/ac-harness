@@ -45,7 +45,10 @@ test("S1a: valid config round-trips; inline env VALUE rejected; bad name rejecte
     const childEnv = spawnEnv(["SOME_NAME", "ABSENT"], process.env);
     assert.equal(childEnv.SOME_NAME, "NAME-VALUE-1");
     assert.equal("ABSENT" in childEnv, false, "absent name simply not passed");
-    assert.ok(!("PATH" in childEnv), "nothing else leaks through");
+    // repair-card BLOCKER: spawnEnv now ALWAYS includes the minimal process
+    // base (PATH/HOME/TMPDIR) — the child must be a functioning process.
+    assert.ok("PATH" in childEnv, "the base set is present (a child needs it)");
+    assert.ok(!("SENTINEL_XYZ" in childEnv), "anything outside base+envFrom stays out");
     delete process.env.SOME_NAME;
 
     // inline env VALUE: rejected

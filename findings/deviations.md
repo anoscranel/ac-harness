@@ -1575,3 +1575,147 @@ Applied MUST-FIX (F1, F9, F19), the SHOULD-FIX list, and the D items from
   (3) session/load: loaded descriptor {turns:1, events:3, limits[4]},
   missing -> -32602 naming the path, torn -> events:4 turns:1 (recovery
   event included). Log residue 0; probe tree cleaned. No push.
+
+## repair-v0100 — reviewer HALT findings applied (2026-11-13)
+
+179. **BLOCKER — envFrom is now wired at the spawn.** spawnEnv (mcp-config.js)
+    gains the MINIMAL PROCESS BASE the card demands: PATH, HOME, TMPDIR,
+    LANG, LC_ALL (+ SystemRoot/ComSpec/PATHEXT on win32) — always present,
+    because a child must be a functioning process — plus the names in
+    envFrom, NOTHING ELSE. McpClient.connect accepts envFrom and spawns with
+    env: spawnEnv(envFrom); the bridge passes server.envFrom through.
+    THE WIRING IS TESTED, not the pure function: a real `node -e` server
+    reports its OWN process.env — the parent-only sentinel (present in the
+    parent, absent from envFrom) never reaches the child; the envFrom-named
+    var does; the base (PATH/HOME) does; the child's key count is minimal
+    (<= 10), not the parent's set. Three sub-fixes the test work surfaced:
+    the probe server must live OUTSIDE the log dir (the pinned deny walks
+    mcp args for paths into the log dir — the same trap the pagination
+    tests document), the report must nest inside serverInfo (my first
+    fixture put it beside), and the bridge's clients map is exposed by
+    connectMcpTools (buildRegistryWithMcp deliberately hides it).
+180. **MAJOR 1 — post-load streaming.** acp.js gains a mutable activeLog
+    (the process's own log at start; session/load sets it to the LOADED log);
+    session/prompt subscribes activeLog (so chunks after a load stream from
+    the loaded log) and the load branch REBINDS sessionId — the load
+    response answers the REBOUND id, and post-load chunks name it. The new
+    test is the one the reviewer asked for: load a real log, then PROMPT,
+    assert session/update agent_message_chunk chunks arrive and the text
+    matches — the previous suite never prompted after load.
+181. **MAJOR 2 — the capability no longer lies.** initialize answers
+    agentCapabilities.loadSession: true; the README's stale v0.7.0
+    "session/load (rejected — no session store)" paragraph now points at
+    the v0.10.0 load section.
+182. **MAJOR 3 — one config-path semantic.** All four surfaces resolve the
+    harness INSTALL ROOT: cli chat (join(new URL(".."))), cli run (same
+    derivation), server (REPO_ROOT), and bin tools (join(root)) — so
+    `ac-harness tools` shows exactly what a session would run. The single
+    helper is repoMcpConfigPath() (also exported as MCP_CONFIG_PATH); no
+    dead export remains. README + deviations §174/§175 note the corrected
+    semantic (§175's cwd decision is SUPERSEDED by the install-root rule).
+183. **MINOR 1 — closed-flag.** close() sets #closed FIRST; #request
+    returns an immediate "client closed" rejection — probe: the after-close
+    callTool rejects in <1s, not the 30s timeout.
+    **MINOR 2 — multi-dot tool names.** tools-list groups by the FIRST dot
+    (server names can never contain one; tool names can contain many):
+    mcp.srvx.config.get_file.json -> server srvx, tool config.get_file.json
+    intact. My first fix (split-based) and my first fixture (a slash in a
+    server name) were both wrong — the live parse probe caught each.
+    **MINOR 3 — down for the §174 note.** The run block's loop.end() (added
+    in v0.10.0 §174) is a DELIBERATE improvement — run mode now ends its
+    session properly — but it changes log CONTENT vs v0.9.0 (a session.end
+    event in headless-run logs that did not previously carry one). It has
+    no determinism effect on the REPL path (run mode is not the replay
+    probe); noted here for the honest ledger.
+184. **Doc items.** README startup-timeout semantics (initialize 30s +
+    tools/list 30s, serialized per server, dead-slow servers delay session
+    start); the mcp section states envFrom is enforced AT SPAWN (which is
+    now true).
+185. **One incidental pre-existing flake fixed in passing (recorded,
+    not carded): the H4 parallel-server test dropped "create A acked"
+    under load because its line-split lost a JSON line split across a chunk
+    boundary — the same class §fix-140 fixed. The stdout handler is now
+    chunk-safe (buffer + newline scan), and the ack frames widened to
+    200x100ms (the 45s test budget holds: 5 consecutive full-suite greens
+    after).
+
+**repair-v0100 gate evidence (2026-11-13, node v24.18.0):**
+- node scripts/check.mjs -> all files OK.
+- bare node --test -> **355 tests, 354 pass, 0 fail, 1 platform skip** —
+  ×5 consecutive full-suite runs green (351-equivalent baseline + 4
+  repair: blocker wiring, MINOR-1 closed-reject, MAJOR-1 post-load stream,
+  MINOR-2 multi-dot grouping; the v0100-connections S1a contract
+  assertion updated to the repaired spawnEnv contract: base PRESENT).
+- sh bench/ship-gate.sh -> PASS (DC6, name-guard, zero-dep).
+- Determinism: run sha == replay sha =
+  49cc29a60ae76d73fd317a2e58f3f1feff0b33b5ad47d4c160244ef4dd8223f2.
+- Probes re-run post-repair: the sentinel child NEVER sees the parent-only
+  var and DOES see the envFrom var + PATH/HOME (live: hasSentinel:false,
+  hasNamed:true); the post-load prompt streams chunks naming the loaded
+  session. Log residue 0. HALT conditions met; STOPPING HERE.
+
+## v0.11.0 "Housekeeping" (2026-11-13)
+
+186. **S1 — --help is a real command.** bin/ac-harness.js gains --help/-h/
+    help: grouped text (chat/session, inspection, maintenance, remote), one
+    line each, exit 0, NO session, NO log write (proven by logs/ before/after
+    set equality). Unknown subcommands exit 2 with "unknown command: X" + the
+    --help pointer (probed: frobnicate → 2); the default-branch still opens
+    the TUI/REPL ONLY when no subcommand was typed. Two leftover H4/mcp
+    probe logs found in logs/ during the test were residue from earlier H4
+    flake debugging — cleaned.
+187. **S2 — memory CLI (src/memory-cli.js).** list (newest first, store
+    path stated, --scope filter), recall (the STORE's own recall() search —
+    no fork), forget (prints the exact record and REFUSES without --yes;
+    with it: one full read → drop-id → write-back through the store's
+    redaction path (events.redact — same as remember()); the store has no
+    tombstone design so a rewrite is the honest removal). Store path
+    selectable via AC_MEMORY_PATH (test seam) with DEFAULT_PATH elsewhere.
+    Probed live: list/recall/refusal/removal-round-trip.
+188. **S3 — logs CLI (src/logs-cli.js).** list (bytes + age label, newest
+    first, total); prune --keep N (newest kept, the rest doomed) or
+    --older-than DAYS (mtime) — refuses without --yes naming EVERY doomed
+    file, then deletes with it. The honest semantics the card demanded are
+    in the output itself: --older-than protects live sessions by
+    mtime-recentness; --keep does not (a deleted-but-open log keeps
+    appending to the removed inode); no lock is held. Probed live on a temp
+    dir: 5 logs, refuse (3 named), prune, 2 newest remain.
+189. **S4 minors.** (1) repoMcpConfigPath()+MCP_CONFIG_PATH are the single
+    source the surfaces call — cli chat, cli run, server, and bin tools all
+    now call it (each hand-rolled derivation replaced; no dead exports —
+    both remain exported AND used). (2) the multi-dot test asserts through
+    the REAL toolsCommand output (a stub server exposing a dotted tool
+    name; the split math is no longer re-implemented inline) — the stub
+    first had to be fragment-assembled (the house discipline for control
+    sequences: the nested-template \n double-unescaped through the heredoc
+    and wrote an unterminated string literal into the stub); the first
+    rewrite also duplicated the command's connect (a leaked child that
+    hung the file until the runner gave up — the duplicate was removed;
+    the command's own connect+close is the only one). (3) the acp.js
+    header no longer says "session/load (unsupported)" — it states the
+    log-backed load and the re-point. (4) the rebind compares against the
+    LOADED session id exactly ("loadme"): this forced one real product
+    fix — load-by-LOG-PATH previously invented a fresh session id when
+    params.sessionId was absent; the rebind now derives the id from the
+    loaded log's own session.start event.
+190. **README** gains the housekeeping section: --help, memory (with the
+    removal-redaction note), logs (with the mtime/inode semantics spelled
+    out), one example each.
+
+**v0.11.0 gate evidence (2026-11-13, node v24.18.0):**
+- node scripts/check.mjs -> all files OK.
+- bare node --test -> **362 tests, 361 pass, 0 fail, 1 platform skip**
+  (the 355-equivalent v0.10.0 baseline + 7 v0110-housekeeping: --help
+  text/no-log/unknown-cmd, memory list-recall-refuse-remove + unknown-id,
+  logs keep-refuse/older-than; the v0100-repair multi-dot test rewritten
+  through the real command; the v0100-repair MAJOR-1 rebind comparison
+  tightened to the loaded id and the source fix it demanded).
+- sh bench/ship-gate.sh -> PASS (DC6, name-guard, zero-dep).
+- Determinism: run sha == replay sha =
+  79cc25fd46cc7c2555529765ce55fa5111c2fab24eb021f8e8221f13f41c8fe9.
+- REAL PROBES (output captured): --help grouped + exit 0 + logs/ set
+  unchanged; frobnicate -> exit 2 + pointer; memory list/recall drawer/
+  forget refuses+prints+then removes exactly one against the tmp store;
+  logs list totals (40 bytes), prune --keep 2 refusal NAMES the 3 doomed
+  files, prune --yes leaves exactly s-4,s-5. Log residue 0; tmp probe
+  residue cleaned. No push.

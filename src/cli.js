@@ -138,7 +138,7 @@ async function chat() {
   // call lands on defaults.ask_mcp; a dead server logs mcp.server.error and
   // contributes zero tools (the session starts with the rest). No
   // mcp.config.json declared = a bare builtin registry = today's behaviour.
-  const mcpConfigPath = resolve(repoRoot, "mcp.config.json");
+  const mcpConfigPath = (await import("./mcp-config.js")).repoMcpConfigPath(); // S4-1: single source
   const hasMcp = await import("node:fs/promises").then(
     (f) => f.access(mcpConfigPath).then(() => true, () => false),
   );
@@ -416,11 +416,11 @@ async function main() {
     let closeMcpOnExit = async () => {};
     const decide = (await import("./context.js")).decide;
     const { buildRegistryWithMcp } = await import("./mcp-bridge.js");
-    const runRepoRoot = resolve(new URL("..", import.meta.url).pathname);
+    const { repoMcpConfigPath } = await import("./mcp-config.js"); // S4-1: single source of the config path
     const loop = createLoop({
       provider,
       tools: await buildRegistryWithMcp(createRegistry, {
-        configPath: resolve(runRepoRoot, "mcp.config.json"),
+        configPath: repoMcpConfigPath(), // S4-1
         policy,
         log,
         askResolver: async () => "deny", // headless run: no human, fail closed

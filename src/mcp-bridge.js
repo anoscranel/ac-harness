@@ -47,6 +47,7 @@ export async function connectMcpTools({
       client = await McpClient.connect({
         command: server.command,
         args: server.args,
+        envFrom: server.envFrom, // repair-card BLOCKER: the validated names reach the spawn
         policy,
         log,
         askResolver,

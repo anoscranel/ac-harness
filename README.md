@@ -162,6 +162,29 @@ capped at 1** (the tool filters `delegate` out of any child allowlist, and
 child); child output is **capped at 1 MiB per stream** with a truncation
 marker; the timeout is **clamped 30s–900s**.
 
+## Housekeeping commands (v0.11.0)
+
+- `ac-harness --help` — the grouped command surface (chat/session,
+  inspection, maintenance, remote), one line each. Exit 0, no session
+  started, no log written. Unknown subcommands exit 2 with a pointer to
+  `--help` instead of silently starting a chat.
+  `ac-harness --help`
+- `ac-harness memory list | recall <query> | forget <id> [--yes]` — the
+  durable store outside a chat turn: `list` (newest first, store path
+  stated), `recall` runs the same search `memory_recall` uses, `forget`
+  prints the exact record it would remove and refuses without `--yes`
+  (removal rewrites the file through the store's redaction path — one
+  record at a time). `memory list --scope ops` filters by scope.
+  `ac-harness memory recall deploy token`
+- `ac-harness logs list | prune --keep N | prune --older-than DAYS [--yes]`
+  — session-log retention: `list` shows size/age (newest first, total
+  bytes); `prune` names the doomed files and their bytes BEFORE `--yes`.
+  Semantics, stated plainly: `--older-than` selects by mtime, so a live
+  session's log (fresh mtime) is protected by construction; `--keep` can
+  still delete one — a deleted-but-open log keeps appending to the removed
+  inode and those lines are lost on close. No lock is held.
+  `ac-harness logs prune --keep 20 --yes`
+
 ## Remote surfaces: MCP server + ACP agent (v0.7.0 ship 3)
 
 **`ac-harness mcp-server`** serves the harness's own tools over MCP stdio
@@ -180,12 +203,14 @@ trust boundary, as with every stdio MCP server.
 
 **`ac-harness acp`** serves the ACP agent side over stdio (separate
 subcommand: ACP and MCP both claim `initialize`, so one process serves ONE
-protocol, never both). Implements initialize (prompt streaming capability),
-session/new, session/load (rejected — the harness has no ACP session
-store), session/prompt (streams `session/update` notifications with
-`agent_message_chunk`), and session/cancel. One ACP session per process.
-Prompts run through a real loop with the same policy engine; `ask` denies
-(the headless deny-and-continue posture). No diff or terminal surfaces.
+protocol, never both). Implements initialize (promptStreaming + loadSession
+capabilities), session/new, session/load (log-backed — see the v0.10.0
+section below), session/prompt (streams `session/update` notifications with
+`agent_message_chunk`), and session/cancel. One ACP session per process;
+a load re-points the live session at the loaded log (post-load prompts
+stream from it). Prompts run through a real loop with the same policy
+engine; `ask` denies (the headless deny-and-continue posture). No diff or
+terminal surfaces.
 
 ## Operator surfaces (v0.8.0)
 
@@ -240,13 +265,24 @@ reason** rather than stalling — the run still proceeds.
 
 ## MCP tools in sessions + ACP session/load (v0.10.0)
 
-**Declaring MCP servers.** `mcp.config.json` at the repo root (gitignored),
-shape `{version:1, servers:{"<name>":{command, args?, envFrom?, enabled?}}}`, name matching
-`^[a-z0-9][a-z0-9-]*$` (it becomes the tool namespace). Env values are
-NEVER accepted inline — `envFrom` is a list of env-var NAMES the bridge
-reads from the process env at spawn time; an inline `env` object in a config
-is a rejected entry. Malformed entries are dropped with a warning; a missing
-file declares zero servers.
+**Declaring MCP servers.** `mcp.config.json` at the harness INSTALL ROOT
+(gitignored; resolved the same way for every surface — the REPL, headless
+`run`, the JSON-RPC server, and `ac-harness tools` all read THE SAME file,
+so `tools` shows exactly what a session would run). Shape
+`{version:1, servers:{"<name>":{command, args?, envFrom?, enabled?}}}`,
+name matching `^[a-z0-9][a-z0-9-]*$` (it becomes the tool namespace). Env
+values are NEVER accepted inline — `envFrom` is a list of env-var NAMES
+ENFORCED AT SPAWN: every MCP child runs with a minimal process base (PATH,
+HOME, TMPDIR — plus the Windows-required set) and ONLY the names in
+`envFrom`; a parent-environment secret is therefore unreachable by
+inheritance. An inline `env` object in a config is a rejected entry.
+Malformed entries are dropped with a warning; a missing file declares zero
+servers.
+
+**Startup timeouts.** Each server's `initialize` handshake and its
+`tools/list` each carry the 30 s RPC timeout, serialized per server: N
+dead-slow servers can delay session start by up to 60 s each (a fail or a
+timeout contributes ZERO tools and the session continues).
 
 At session start (the REPL, headless `run`, and the JSON-RPC server) every
 enabled server is connected via the policy-gated spawn: its tools arrive as

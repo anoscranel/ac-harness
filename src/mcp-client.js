@@ -7,6 +7,7 @@
 // by policy like any other tool.
 
 import { spawn } from "node:child_process";
+import { spawnEnv } from "./mcp-config.js"; // repair-card BLOCKER: the env allowlist for every spawned server
 import { resolveAsk } from "./policy.js";
 import { HARNESS_VERSION } from "./version.js";
 
@@ -29,6 +30,7 @@ export class McpClient {
   constructor(child, serverInfo) {
     this.#child = child;
     this.serverInfo = serverInfo;
+    this.#closed = false; // repair-card MINOR 1: requests after close() reject immediately
     // v0.6.0 SR3: paginated tools/list cache + list_changed notification
     // invalidation. The cache is ONLY a memo: notifications/tools/list_changed
     // flips it stale; the next listTools() re-walks every page.
@@ -38,6 +40,7 @@ export class McpClient {
 
   #cachedTools;
   #onToolsChanged;
+  #closed;
 
   /** v0.6.0 SR3: register a tools/list_changed listener. */
   onToolsChanged(fn) {
@@ -54,7 +57,7 @@ export class McpClient {
    * Policy-gated connect. The spawn is evaluated as tool "mcp.spawn" BEFORE
    * any process exists; ask resolves through the environment's ask channel.
    */
-  static async connect({ command, args = [], policy, log, askResolver, protocolVersion = DEFAULT_PROTOCOL }) {
+  static async connect({ command, args = [], envFrom = [], policy, log, askResolver, protocolVersion = DEFAULT_PROTOCOL }) {
     const call = { tool: "mcp.spawn", args: { command, args } };
     const decision = policy.evaluate(call);
     await log.appendEvent("policy.decision", "policy", {
@@ -81,8 +84,12 @@ export class McpClient {
     if (!allowed) throw new Error(`MCP spawn denied by policy: ${command}`);
 
     // F2 (review-r1): detached group so close() can kill the whole tree.
+    // repair-card BLOCKER: env is the ALLOWLIST (base process vars + the
+    // names in envFrom), never process.env. Every MCP child inherits only
+    // what the operator NAMED — the disclosure class the release refuses.
     const child = spawn(command, args, {
       stdio: ["pipe", "pipe", "inherit"],
+      env: spawnEnv(envFrom),
       detached: process.platform !== "win32",
     });
     // v0.10.0 S1b: a failed spawn surfaces ONLY as an async 'error' event
@@ -188,6 +195,7 @@ export class McpClient {
   }
 
   #request(method, params) {
+    if (this.#closed) return Promise.reject(new Error("client closed")); // MINOR 1
     const id = this.#nextId++;
     return new Promise((res, rej) => {
       const timer = setTimeout(() => {
@@ -242,6 +250,7 @@ export class McpClient {
   }
 
   async close() {
+    this.#closed = true; // before anything: new requests reject immediately
     // v0.7.0 flake-fix (the 304s hang): clear the timers AND settle the
     // promises. A caller awaiting listTools/callTool while close() runs
     // previously hung until the 30s timers fired — and a response that could

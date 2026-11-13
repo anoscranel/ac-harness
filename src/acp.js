@@ -1,8 +1,10 @@
 // src/acp.js — ship-3 spec §2: the ACP (agentclientprotocol) AGENT side.
-// Narrow by design: initialize / session/new / session/load (unsupported) /
-// session/prompt (streaming session/update with agent_message_chunk) /
-// session/cancel. One ACP session per process; cancel aborts the in-flight
-// turn. Every prompt runs through a real loop with the same policy engine;
+// Narrow by design: initialize / session/new / session/load (log-backed,
+// the event log IS the session store — v0.10.0 §S2) / session/prompt
+// (streaming session/update with agent_message_chunk) / session/cancel. One
+// ACP session per process; cancel aborts the in-flight turn; a load
+// re-points the live session at the loaded log (post-load prompts stream
+// from it). Every prompt runs through a real loop with the same policy engine;
 // `ask` → deny via remoteDecide (no human on this stream, and a remote
 // caller cannot answer its own permission prompt — spec §0).
 //
@@ -55,6 +57,7 @@ export async function serveAcp({
   /** ONE ACP session per process (spec §2 boundary). */
   let loop = null;
   let sessionId = null;
+  let activeLog = log; // repair-card MAJOR 1: session/load rebinds BOTH the loop AND the event source
   let streamingPrompt = null; // {cancelled, controller}
   let promptSeq = 0;
 
@@ -84,7 +87,7 @@ export async function serveAcp({
       case "initialize":
         respond(id, {
           protocolVersion: 1,
-          agentCapabilities: { promptStreaming: true, loadSession: false },
+          agentCapabilities: { promptStreaming: true, loadSession: true }, // repair-card MAJOR 2
           authMethods: [],
         });
         break;
@@ -146,10 +149,17 @@ export async function serveAcp({
           config: { session: msg.params?.sessionId ?? candidate, harness_version: HARNESS_VERSION },
         });
         await loop.resume(); // v0.10.0 S2: the SAME resume() path as the REPL
+        activeLog = loadedLog; // MAJOR 1: post-load chunks stream from the LOADED log
+        // v011.0 S4-4: rebind to the LOADED session's id — the explicit
+        // sessionId when given, else the log's own session id from its
+        // session.start event (load-by-path must not invent a fresh id).
+        const evs0 = await readAll(candidate);
+        const started = evs0.find((e) => e.type === "session.start");
+        sessionId = msg.params?.sessionId ?? started?.data?.session ?? `acp-session-${Date.now()}`; // MAJOR 1: rebind
         const evs = await readAll(candidate);
         const turns = evs.filter((e) => e.type === "turn.start").length;
         respond(id, {
-          sessionId: msg.params?.sessionId ?? candidate,
+          sessionId, // the REBOUND id (MAJOR 1)
           log: candidate,
           turns,
           events: evs.length,
@@ -183,17 +193,17 @@ export async function serveAcp({
             });
           }
         };
-        log.on("event", streamSub);
+        activeLog.on("event", streamSub); // MAJOR 1: the LIVE log, post-load included
         let result;
         try {
           result = await loop.start(text);
         } catch (err) {
-          log.off("event", streamSub);
+          activeLog.off("event", streamSub);
           streamingPrompt = null;
           respondError(id, -32603, `agent error: ${err?.message ?? err}`);
           break;
         }
-        log.off("event", streamSub);
+        activeLog.off("event", streamSub);
         const wasCancelled = streamingPrompt.cancelled;
         streamingPrompt = null;
         // stopReason per ACP: end_turn on clean completion; the harness

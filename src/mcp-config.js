@@ -8,7 +8,8 @@
 // rest of the harness refuses).
 
 import { readFile } from "node:fs/promises";
-import { join } from "node:path";
+import { join, dirname } from "node:path";
+import { fileURLToPath } from "node:url";
 
 const SERVER_NAME_RE = /^[a-z0-9][a-z0-9-]*$/;
 
@@ -88,12 +89,23 @@ export async function loadMcpConfig(file, { warn = null } = {}) {
 }
 
 /**
- * Build the per-server spawn env: allowlist discipline like delegate's
- * childEnv — only the NAMES in envFrom pass through, nothing else.
+ * Build the per-server spawn env (repair-card BLOCKER): a MINIMAL PROCESS
+ * BASE (everything a child needs to be a functioning process) PLUS the
+ * names in envFrom — nothing else. This is delegate's childEnv discipline:
+ * the child is a subprocess the operator declared, not an heir to the
+ * parent's secrets. If the base set proves too thin on a platform, grow the
+ * BASE here — never fall back to the whole environment.
  * @returns {{[k:string]:string}} env for spawn
  */
 export function spawnEnv(envFrom, parent = process.env) {
   const out = {};
+  // minimal functioning-process base (platform aware)
+  const BASE = ["PATH", "HOME", "TMPDIR", "LANG", "LC_ALL"];
+  if (process.platform === "win32") BASE.push("SystemRoot", "SYSTEMROOT", "ComSpec", "PATHEXT");
+  for (const name of BASE) {
+    const v = parent[name];
+    if (typeof v === "string") out[name] = v;
+  }
   for (const name of envFrom ?? []) {
     const v = parent[name];
     if (typeof v === "string") out[name] = v; // absent name = simply not passed
@@ -112,5 +124,10 @@ export function enabledServers({ servers } = {}) {
     .map(([name, s]) => ({ name, command: s.command, args: s.args, envFrom: s.envFrom }));
 }
 
-export default { loadMcpConfig, spawnEnv, enabledServers };
-export const MCP_CONFIG_PATH = typeof process !== "undefined" ? join(process.cwd(), "mcp.config.json") : "mcp.config.json";
+export function repoMcpConfigPath() {
+  // <root>/src/mcp-config.js -> <root>/mcp.config.json
+  return join(dirname(fileURLToPath(import.meta.url)), "..", "mcp.config.json");
+}
+
+export default { loadMcpConfig, spawnEnv, enabledServers, repoMcpConfigPath };
+export { repoMcpConfigPath as MCP_CONFIG_PATH };

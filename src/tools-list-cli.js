@@ -43,8 +43,15 @@ export async function toolsCommand(argv = [], { stdout = process.stdout, configP
     // mcp.server.error logged into the caller's log).
     const { extras, close } = await connectMcpTools({ configPath: realConfigPath, policy, log });
     for (const name of Object.keys(extras)) {
-      const [prefix, server, tool] = name.split(".");
-      if (prefix !== "mcp") continue;
+      // repair-card MINOR 2: dots are legal in TOOL names (and never in
+      // server names — the config regex). Parse by FIRST dot, not split:
+      // "mcp.<server>.<rest-with-dots>".
+      if (!name.startsWith("mcp.")) continue;
+      const rest = name.slice(4);
+      const dot = rest.indexOf(".");
+      if (dot < 1) continue; // no tool part
+      const server = rest.slice(0, dot);
+      const tool = rest.slice(dot + 1);
       (groups[server] ??= []).push(tool);
     }
     connectedCount = Object.keys(groups).length;
