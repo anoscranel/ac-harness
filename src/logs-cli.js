@@ -10,7 +10,7 @@
 import { readdir, stat, rm } from "node:fs/promises";
 import { join, resolve } from "node:path";
 
-const USAGE = "usage: ac-harness logs <list | prune --keep N | prune --older-than DAYS [--yes]>";
+const USAGE = "usage: ac-harness logs <list | prune --keep N | prune --older-than DAYS [--yes] | search <pattern> [--type t] [--tools name] [--limit N]>";
 
 async function listLogs(dir) {
   const out = [];
@@ -28,6 +28,13 @@ async function listLogs(dir) {
   }
   out.sort((a, b) => b.mtimeMs - a.mtimeMs); // newest first
   return out;
+}
+
+function typeLabel(ev) {
+  return `${ev.type ?? "?"} ${tsLabel(ev)}`;
+}
+function tsLabel(ev) {
+  return typeof ev.ts === "number" ? new Date(ev.ts * 1000).toISOString().slice(11, 19) : "";
 }
 
 function ageLabel(mtime, now = Date.now()) {
@@ -108,6 +115,67 @@ export async function logsCommand(argv = [], { stdout = process.stdout, logsDir 
       for (const f of doomed) await rm(f.full, { force: true });
       out(`pruned ${doomed.length} log(s), ${bytes} bytes reclaimed`);
       void keepIdx;
+      return { lines, exitCode: 0 };
+    }
+
+    case "search": {
+      // v0.12.0 S2: the log is the record — searchable. Regex over the log
+      // dir (read-only; --limit caps RESULTS not scan; streamed line-by-line
+      // from disk, never readAll-then-grep). Hits: file, seq, ts, type, and a
+      // human one-liner via the same per-event renderers the TUI uses.
+      const parts = rest.filter((a) => !a.startsWith("--"));
+      const pattern = parts[0];
+      if (pattern === undefined) {
+        out(USAGE);
+        return { lines, exitCode: 2 };
+      }
+      let re;
+      try {
+        re = new RegExp(pattern, "i");
+      } catch (err) {
+        out(`invalid regex: ${pattern} (${err.message})`);
+        return { lines, exitCode: 2 };
+      }
+      const getFlag = (name, fallback) => {
+        const idx = rest.indexOf(name);
+        const v = idx >= 0 ? rest[idx + 1] : undefined;
+        return v === undefined ? fallback : v;
+      };
+      const typeFilter = getFlag("--type", null);
+      const toolsFilter = getFlag("--tools", null);
+      const limit = Math.max(1, Number(getFlag("--limit", 50)) || 50);
+
+      const { createReadStream } = await import("node:fs");
+      const { createInterface } = await import("node:readline");
+      const { renderEventLine } = await import("./log-render.js");
+      const files = await listLogs(dir); // newest first
+      const hits = [];
+      for (const f of files) {
+        if (hits.length >= limit) break;
+        const rl = createInterface({ input: createReadStream(f.full), crlfDelay: Infinity });
+        for await (const line of rl) {
+          if (hits.length >= limit) break;
+          let ev;
+          try { ev = JSON.parse(line); } catch { continue; } // torn tail
+          if (typeFilter && ev.type !== typeFilter) continue;
+          if (toolsFilter && ev.data?.tool !== toolsFilter) continue;
+          // match against the raw line content (human text + all fields)
+          if (!re.test(line) && !re.test(renderEventLine(ev))) continue;
+          hits.push({ file: f.name, ev });
+        }
+      }
+      if (hits.length === 0) {
+        out(`no matches for /${pattern}/ in ${dir}`);
+        return { lines, exitCode: 0 };
+      }
+      out(`matches for /${pattern}/ in ${dir}`);
+      for (const h of hits.slice(0, limit)) {
+        out(`${h.file}  seq ${h.ev.seq}  ${typeLabel(h.ev)}  ${renderEventLine(h.ev)}`);
+      }
+      // honest cap: --limit caps RESULTS; say so plainly when it did.
+      if (hits.length >= limit) {
+        out(`showing first ${limit} matches (cap reached; refine the pattern or raise --limit)`);
+      }
       return { lines, exitCode: 0 };
     }
 

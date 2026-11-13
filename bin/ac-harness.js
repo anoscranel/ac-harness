@@ -37,6 +37,7 @@ chat / session
   chat              interactive REPL (echo provider by default)
   tui               alt-screen TUI (requires a real terminal)
   server            headless JSON-RPC 2.0 NDJSON stdio server
+  run "<prompt>" [--provider id] [--policy-allow tool]  headless one-shot (exit 0/1/2)
 
 inspection (all read-only)
   stats <log>       per-session usage report (turns, tokens, tools, asks)
@@ -50,6 +51,8 @@ inspection (all read-only)
 maintenance (destructive acts refuse without --yes)
   memory forget <id> [--yes]    remove ONE memory record (prints it first)
   logs prune --keep N | --older-than DAYS [--yes]   reclaim session-log space
+  logs search <pattern> [--type t] [--tools name]   find WHICH session did X
+  export <log> [--md] [--out <file>]                   a session as human-readable md
   checkpoint restore <seq> [--yes] [--prune]         roll files back (preview first)
   checkpoint prune --keep N                        bound the snapshot store
 
@@ -110,6 +113,12 @@ run a subcommand with no arguments for its usage line; exit 0 here.`;
     process.exit(r.exitCode);
     break;
   }
+  case "export": { // v0.12.0 S3: human-readable session transcript
+    const { exportCommand } = await import(join(root, "src", "export-cli.js"));
+    const r = await exportCommand(rest, { stdout: process.stdout });
+    process.exit(r.exitCode);
+    break;
+  }
   case "memory": { // v0.11.0 S2: durable-memory surface (list/recall/forget)
     const { memoryCommand } = await import(join(root, "src", "memory-cli.js"));
     const r = await memoryCommand(rest, { stdout: process.stdout });
@@ -134,6 +143,11 @@ run a subcommand with no arguments for its usage line; exit 0 here.`;
     break;
   case "chat":
     run("src/cli.js", []);
+    break;
+  case "run": // v0.12.0 S1: headless one-shot — the cron/delegate primitive
+    // pass-through with the SAME argv (cli.js owns --provider/--policy-allow
+    // parsing and the 0/1/2 exit-code contract).
+    run("src/cli.js", ["run", ...rest]);
     break;
   case "tui":
     run("src/tui/main.js", []);

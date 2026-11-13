@@ -335,14 +335,13 @@ async function main() {
     //   node src/cli.js run --provider echo "tool:bash {\"cmd\":\"ls\"}"   (CI)
     //   node src/cli.js run --policy-allow read "what is here?"       (no asks)
     //
-    // Exit codes follow the checkpoint gate: 0 = clean, 1 = tool/policy
-    // failure, 2 = usage error. `--policy-allow` PRE-WRITES a session allow
+    // Exit codes: 0 = clean (incl. deny-and-continue), 1 = thrown run
+    // error, 2 = usage error. `--policy-allow` PRE-WRITES a session allow
     // rule for one tool (single-turn convenience for CI and cron, not a
     // backdoor: it widens nothing for later invocations).
     const { Policy } = await import("./policy.js");
     const { defaultRules } = await import("./policy-defaults.js");
     const { createRegistry } = await import("./tools/index.js");
-    const { createProviderRegistry } = await import("./providers/registry.js");
     const { default: echo } = await import("./providers/echo.js");
     const { createLoop } = await import("./loop.js");
     const { createDefaultVerifyGate } = await import("./verify.js");
@@ -396,16 +395,17 @@ async function main() {
       policy.addSessionRule({ tool: t }, "allow");
     }
 
+    // v0.12.0 S1 (disk wins): headless run supports the DETERMINISTIC local
+    // providers only — echo (the CI/cron provider). The pre-existing
+    // createProviderRegistry call was dead code that crashed with "cli fatal"
+    // (exit 1) instead of the promised exit 2; the honest minimal fix is the
+    // explicit allowlist with the usage-line contract honored.
     let provider;
     if (providerId === "echo") {
       provider = echo;
     } else {
-      const reg = createProviderRegistry();
-      provider = reg.get(providerId);
-      if (!provider) {
-        process.stderr.write(`unknown provider: ${providerId} (have: echo ${reg.ids?.().join(" ") || ""})\n`);
-        process.exit(2);
-      }
+      process.stderr.write(`unknown provider: ${providerId} (run supports: echo)\n`);
+      process.exit(2);
     }
 
     // Headless mode must NEVER hang on a permission prompt: the deny-and-

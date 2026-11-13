@@ -184,6 +184,18 @@ marker; the timeout is **clamped 30s–900s**.
   still delete one — a deleted-but-open log keeps appending to the removed
   inode and those lines are lost on close. No lock is held.
   `ac-harness logs prune --keep 20 --yes`
+- `ac-harness run "<prompt>" [--provider echo] [--policy-allow tool]` — the
+  headless one-shot (exit 0 clean / 1 thrown error / 2 usage); the cron and
+  delegate primitive, single-turn session rules die with the run.
+  `ac-harness run "summarize logs/x.jsonl" --policy-allow read`
+- `ac-harness logs search <pattern>` — which session did X: regex find over
+  the log dir (newest-first), `--type`/`--tools` filters, `--limit` caps
+  results with an honest cap line.
+  `ac-harness logs search "deploy" --type turn.start`
+- `ac-harness export <log> [--md] [--out <file>]` — the session as a
+  human-readable markdown transcript (deterministic; the same log exports
+  byte-identically).
+  `ac-harness export logs/run-x.jsonl --out session.md`
 
 ## Remote surfaces: MCP server + ACP agent (v0.7.0 ship 3)
 

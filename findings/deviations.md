@@ -1719,3 +1719,67 @@ Applied MUST-FIX (F1, F9, F19), the SHOULD-FIX list, and the D items from
   logs list totals (40 bytes), prune --keep 2 refusal NAMES the 3 doomed
   files, prune --yes leaves exactly s-4,s-5. Log residue 0; tmp probe
   residue cleaned. No push.
+
+## v0.12.0 "Automation" (2026-11-13)
+
+191. **S1 — run through bin.** bin/ac-harness.js gains the `run` case
+    (pass-through of the full argv, exactly like `chat`) plus a help line
+    under the automation group with its exit-code contract. The
+    SUBPROCESS tests pinned the REAL semantics, which differed from the
+    card's stated acceptance — DISK WINS, logged here: (a) exit 1 is
+    reserved for a THROWN run error; a headless DENIED ask is
+    deny-and-continue, the turn completes, exit 0, the denial recorded in
+    the log (the card's "a tool-failing run exits 1" assumed the throw —
+    the honest test asserts the real contract); (b) unknown flags are not
+    rejected by cli.js's run (they become prompt text); the real exit-2
+    cases are NO prompt and UNKNOWN --provider.
+192. **S1 collateral fix (real product bug, disk-wins).** cli.js's run path
+    called `createProviderRegistry()` — a function that never existed
+    (probed: `--provider anything` crashed "cli fatal", exit 1, instead of
+    the promised exit 2). Fixed to the honest allowlist: run supports echo
+    (the deterministic CI/cron provider); any other --provider exits 2 with
+    the supported list — the usage line's contract now holds. The dead
+    import removed.
+193. **S2 — logs search.** src/logs-cli.js gains `search <pattern>` with
+    --type/--tools/--limit: streamed line-by-line (createInterface over
+    createReadStream; never readAll-to-grep), newest-first files,
+    torn-tail tolerant, hits rendered as file/seq/type/human-one-liner via
+    src/log-render.js (NEW: plain-text per-event one-liners — the TUI's
+    renderers carry the screen's requirements; these are the search
+    surface's equivalents). Zero matches exits 0 with "no matches";
+    invalid regex exits 2 naming the error; --limit caps RESULTS with an
+    honest "showing first N (cap reached)" line. Read-only.
+194. **S3 — export.** src/export-cli.js (NEW): deterministic markdown
+    transcript — # session <id>, per-turn sections, assistant text
+    reassembled from chunk deltas (flushed at provider.response/turn end),
+    tool call/results as fenced one-liners, policy decisions/asks inline,
+    compaction as blockquotes, session.error as bold; torn tail skipped
+    with nothing invented. --out writes only the named file + prints the
+    path. First draft of this file had a broken half-written
+    chunk-buffer design (a PUSH_SENTINEL return left the transcript body
+    malformed and an out-of-band test caught a stray reference); the file
+    was rewritten clean with the synchronous flushText closure. Byte-
+    identical across two exports (asserted).
+195. **Test-side stumbles this card, both root-caused:** the search
+    fixture used writeFile where append was needed (each write OVERWROTE
+    the file — the marker vanished; appendFile fixed it) and the export
+    tests passed argv including the subcommand name (the bin strips it;
+    the module contract takes argv WITHOUT it — my probe of the live bin
+    output surfaced the mismatch). Version bumped to 0.12.0 as the last
+    step; --version verified 0.12.0.
+
+**v0.12.0 gate evidence (2026-11-13, node v24.18.0):**
+- node scripts/check.mjs -> all files OK.
+- bare node --test -> **370 tests, 369 pass, 0 fail, 1 platform skip**
+  (362-equivalent v0.11.0 baseline + 8 v0120-automation: 4 run-through-
+  bin subprocess tests incl. the real exit contracts, 2 search tests, 2
+  export determinism/--out tests; admitted: the card's stated exit-1
+  acceptance rewritten to the real deny-and-continue contract per §191).
+- sh bench/ship-gate.sh -> PASS (DC6, name-guard, zero-dep).
+- Determinism: run sha == replay sha =
+  3092f3a7cb5b2fbbf29e3ec662be5f80f24c3552e5d88821e216ede78c97fa69 (re-verified; previously corrupted in transcription)
+  (the three new surfaces are read-only over logs; no log-format changes).
+- Live probes: `ac-harness run "hello"` -> summary JSON, exit 0; run with
+  a denied ask -> exit 0 + deny recorded; `--help` lists all three; the
+  export of a real fresh session renders the user text + the reassembled
+  echo reply. Version 0.12.0 confirmed. Log residue 0. No push.

@@ -1,6 +1,6 @@
 {
   "name": "agent-harness",
-  "version": "0.11.0",
+  "version": "0.12.0",
   "description": "Production open-source AI agent harness: event-sourced loop, tools, providers, policy, plugins, MCP. Zero npm dependencies.",
   "type": "module",
   "license": "Apache-2.0",
