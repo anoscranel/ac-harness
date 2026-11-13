@@ -75,6 +75,12 @@ export function listEnvProviders(env) {
     if (typeof apiKeyEnv === "string" && apiKeyEnv !== "") entry.apiKeyEnv = apiKeyEnv;
     const ctxLimit = Number(e[`${ENV_PREFIX}${id}_CONTEXT_LIMIT`]);
     if (Number.isFinite(ctxLimit) && ctxLimit > 0) entry.contextLimit = Math.floor(ctxLimit);
+    // v0.9.0 S1: env pricing (per-Mtok micro-unit; finite, >= 0; both or none)
+    const inMtok = Number(e[`${ENV_PREFIX}${id}_INPUT_PER_MTOK`]);
+    const outMtok = Number(e[`${ENV_PREFIX}${id}_OUTPUT_PER_MTOK`]);
+    if (Number.isFinite(inMtok) && inMtok >= 0 && Number.isFinite(outMtok) && outMtok >= 0) {
+      entry.pricing = { input_per_mtok: Math.round(inMtok), output_per_mtok: Math.round(outMtok) };
+    }
     return entry;
   });
 }
@@ -109,7 +115,7 @@ export function buildFromEnv(entry, env) {
  * stray key-VALUE field can ever persist even if a caller passes one).
  * @returns {{id:string, baseUrl:string, model:string, apiKeyEnv?:string, source:"env"|"tui"}}
  */
-function rowOf(p) {
+function rowOf(p, { onDroppedPricing = null } = {}) {
   if (!p || typeof p !== "object") return null;
   const row = {
     id: String(p.id),
@@ -117,6 +123,21 @@ function rowOf(p) {
     model: String(p.model ?? ""),
     source: p.source === "env" ? "env" : "tui",
   };
+  // v0.9.0 S1: pricing survives the whitelist. Both fields must be finite
+  // and >= 0 — half-formed or negative pricing is DROPPED (never stored
+  // half); the caller's warn channel reports the drop. NOT a secret: the
+  // per-Mtok micro-unit rate lives in the file plainly (same as contextLimit).
+  const pr = p.pricing;
+  if (pr && typeof pr === "object" &&
+      Number.isFinite(pr.input_per_mtok) && pr.input_per_mtok >= 0 &&
+      Number.isFinite(pr.output_per_mtok) && pr.output_per_mtok >= 0) {
+    row.pricing = {
+      input_per_mtok: Math.round(pr.input_per_mtok),
+      output_per_mtok: Math.round(pr.output_per_mtok),
+    };
+  } else if (pr !== undefined && pr !== null && typeof onDroppedPricing === "function") {
+    onDroppedPricing(String(p.id));
+  }
   // v0.5.0 H5: per-provider context limit (NOT a secret — stored plainly).
   if (Number.isFinite(p.contextLimit) && p.contextLimit > 0) {
     row.contextLimit = Math.floor(p.contextLimit);
@@ -129,8 +150,14 @@ function rowOf(p) {
 /** Serialize profiles to disk. FILTERED SHAPE ONLY {version, providers} — the
  *  whitelist above is the serialization boundary for secrets: apiKey values
  *  never enter a row, so they never reach the file. */
-export async function saveProfiles(file, list) {
-  const providers = (Array.isArray(list) ? list : []).map(rowOf).filter(Boolean);
+export async function saveProfiles(file, list, { warn = null } = {}) {
+  const dropped = [];
+  const providers = (Array.isArray(list) ? list : [])
+    .map((r) => rowOf(r, { onDroppedPricing: (id) => dropped.push(id) }))
+    .filter(Boolean);
+  if (dropped.length > 0 && typeof warn === "function") {
+    warn(`saveProfiles: malformed pricing on ${dropped.join(", ")} dropped (both fields must be finite numbers >= 0)`);
+  }
   const payload = { version: PROFILES_VERSION, providers };
   await writeFile(file, JSON.stringify(payload, null, 2) + "\n", "utf8");
   return providers.length;
@@ -142,6 +169,7 @@ export async function saveProfiles(file, list) {
  * @returns {Promise<Array>} normalized rows (empty on any read/parse failure)
  */
 export async function loadProfiles(file, { warn = null } = {}) {
+  const dropped = []; // v0.9.0 S1: malformed pricing rows, reported not stored
   let raw;
   try {
     raw = await readFile(file, "utf8");
@@ -159,7 +187,11 @@ export async function loadProfiles(file, { warn = null } = {}) {
     if (typeof warn === "function") warn("providers.config.json has wrong shape (using empty list)");
     return [];
   }
-  return data.providers.map(rowOf).filter(Boolean);
+  const rows = data.providers.map((r) => rowOf(r, { onDroppedPricing: (id) => dropped.push(id) })).filter(Boolean);
+  if (dropped.length > 0 && typeof warn === "function") {
+    warn(`providers.config.json: malformed pricing on ${dropped.join(", ")} dropped (both fields must be finite numbers >= 0)`);
+  }
+  return rows;
 }
 
 /**

@@ -90,11 +90,16 @@ export function buildReport(events) {
  */
 export function computeCostFromProfile(report, profile) {
   const pricing = profile?.pricing;
-  if (!pricing || !Number.isFinite(pricing.input_per_mtok) || !Number.isFinite(pricing.output_per_mtok)) {
+  if (!pricing || !Number.isFinite(pricing.input_per_mtok) || pricing.input_per_mtok < 0 ||
+      !Number.isFinite(pricing.output_per_mtok) || pricing.output_per_mtok < 0) {
     return null;
   }
-  const input = Math.round((report.tokens.input / 1e6) * pricing.input_per_mtok);
-  const output = Math.round((report.tokens.output / 1e6) * pricing.output_per_mtok);
+  // v0.9.0 fix: rate is in CURRENCY UNITS per Mtok (the industry convention:
+  // $3/Mtok). tokens/1e6 * rate yields currency units, so it must be scaled by
+  // 1e6 to become micro-units — which collapses to tokens * rate. Without the
+  // scale a $18.00 session was recorded as 18 micro-USD ($0.000018).
+  const input = Math.round(report.tokens.input * pricing.input_per_mtok);
+  const output = Math.round(report.tokens.output * pricing.output_per_mtok);
   return {
     input_micro_usd: input,
     output_micro_usd: output,

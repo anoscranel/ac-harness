@@ -3,9 +3,13 @@
 // refuses to spawn unless ctx.allowed === true (defence in depth).
 // Cancellation: ctx.signal abort kills the child mid-execution.
 import { spawn } from "node:child_process";
+import { CheckpointStore, resolveRoot } from "../checkpoint.js";
 
 export const name = "bash";
-export const description = "Run a shell command via sh -c. Gated by policy (ask by default).";
+export const description =
+  "Run a shell command via sh -c. Gated by policy (ask by default). " +
+  "Snapshots the working tree first (v0.9.0 S3) so a bash rewrite is undoable " +
+  "like write/edit; --no-snapshot opts a deliberate run out.";
 
 export const argsSchema = {
   type: "object",
@@ -14,6 +18,7 @@ export const argsSchema = {
   properties: {
     command: { type: "string", minLength: 1 },
     timeout_ms: { type: "integer" },
+    no_snapshot: { type: "boolean", description: "v0.9.0 S3: skip the pre-run snapshot (deliberate; default ON)" },
   },
 };
 
@@ -26,6 +31,39 @@ export async function run(args, ctx = {}) {
     return { ok: false, error: "policy gate did not allow this bash call", output: "" };
   }
   const timeoutMs = args.timeout_ms ?? DEFAULT_TIMEOUT_MS;
+
+  // v0.9.0 S3 (the v0.8.0 survey's dead-end 3): bash is the ONLY mutating
+  // tool without an undo. Snapshot BEFORE the shell runs — the most damaging
+  // tool should be the most undoable. Content-addressed store: an unchanged
+  // tree costs a manifest, not copies. Best-effort exactly like write.js: a
+  // checkpoint failure never blocks the run but IS reported.
+  // Guards: --no-snapshot opts a deliberate run out entirely; a byte budget
+  // (default 32 MiB PER RUN, store.total) skips with a reason instead of
+  // stalling a phone-class device on a big tree.
+  let checkpoint = null;
+  if (args.no_snapshot === true) {
+    checkpoint = { skipped: "no_snapshot: requested" };
+  } else {
+    try {
+      const cwd = ctx.cwd ?? process.cwd();
+      const store = new CheckpointStore({ root: resolveRoot(ctx.checkpointRoot), cwd });
+      const SNAP_BYTE_BUDGET = Number(process.env.AC_BASH_SNAPSHOT_MAX_BYTES || 32 << 20);
+      const bytes = await store.size();
+      if (bytes > SNAP_BYTE_BUDGET) {
+        // one tally, then the snapshot WOULD walk the same tree: skip
+        checkpoint = {
+          skipped: `snapshot budget: store is ${bytes} bytes (budget ${SNAP_BYTE_BUDGET}); snapshot skipped`,
+        };
+      } else {
+        const { seq } = await store.snapshot({
+          label: `bash:${args.command.slice(0, 40)}`,
+        });
+        checkpoint = seq;
+      }
+    } catch (e) {
+      checkpoint = { error: String(e && e.message || e) };
+    }
+  }
 
   return await new Promise((resolvePromise) => {
     // F2 (review-r1): detached so the child leads its own process group;
@@ -119,6 +157,7 @@ export async function run(args, ctx = {}) {
         error: code === 0 ? undefined : `exit code ${code}`,
         bytes: Buffer.byteLength(output, "utf8"),
         truncated,
+        checkpoint, // v0.9.0 S3: seq | {skipped} | {error} — the undo trail
       });
     });
   });

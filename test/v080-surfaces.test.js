@@ -164,7 +164,10 @@ test("S3: no pricing → the explicit n/a line; a profile with pricing computes 
   // a profile WITH pricing → money with unit + source
   const cost = computeCostFromProfile(report, {
     id: "my-provider",
-    pricing: { input_per_mtok: 3_000_000, output_per_mtok: 6_000_000 }, // micro-usd per Mtok
+    // v0.9.0: rate is in CURRENCY UNITS per Mtok (the human convention: $3/Mtok).
+    // The v0.8.0 draft supplied 3_000_000 here while asserting the currency-unit
+    // result below — inputs and expectations contradicted each other.
+    pricing: { input_per_mtok: 3, output_per_mtok: 6 },
   });
   assert.equal(cost.input_micro_usd, 750_000);
   assert.equal(cost.output_micro_usd, 300_000);
@@ -173,7 +176,7 @@ test("S3: no pricing → the explicit n/a line; a profile with pricing computes 
   const priced = formatReport(report, { cost });
   assert.match(priced, /cost: \$1\.0500/);
   assert.match(priced, /from provider profile "my-provider"/);
-  assert.match(priced, /input \$3000000\/Mtok · output \$6000000\/Mtok/);
+  assert.match(priced, /input \$3\/Mtok · output \$6\/Mtok/);
   // and the n/a line is GONE in the priced form
   assert.ok(!priced.includes("n/a"));
 });

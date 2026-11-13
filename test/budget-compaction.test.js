@@ -535,7 +535,9 @@ test("H5: TUI add/edit form round-trips contextLimit", async () => {
   const bad = p.formSubmit("not-a-number");
   assert.equal(bad.action, "none");
   assert.match(bad.error, /positive integer/);
-  const res = p.formSubmit("8000");
+  p.formSubmit("8000");
+  p.formSubmit(""); // inputPerMtok blank (v0.9.0 S1)
+  const res = p.formSubmit(""); // outputPerMtok — finalizes
   assert.equal(res.action, "submit");
   assert.equal(res.profile.contextLimit, 8000, "emitted on the profile");
   // blank → field omitted (128k default)
@@ -545,6 +547,8 @@ test("H5: TUI add/edit form round-trips contextLimit", async () => {
   p.formSubmit("https://ctx.test/v1");
   p.formSubmit("m");
   p.formSubmit("");
+  p.formSubmit("");
+  p.formSubmit(""); // pricing blanks (v0.9.0 S1)
   const res2 = p.formSubmit("");
   assert.equal(res2.action, "submit");
   assert.ok(!("contextLimit" in res2.profile), "blank = no field (default)");
@@ -559,7 +563,9 @@ test("H5: TUI add/edit form round-trips contextLimit", async () => {
   p2.formSubmit("https://t.test/v1");
   p2.formSubmit("m");
   p2.formSubmit("");
-  const res3 = p2.formSubmit("12000"); // edit value
+  p2.formSubmit("12000"); // edit value
+  p2.formSubmit(""); // inputPerMtok blank
+  const res3 = p2.formSubmit(""); // outputPerMtok — finalizes (v0.9.0 S1)
   assert.equal(res3.action, "edit");
   assert.equal(res3.profile.contextLimit, 12000, "edited value emitted");
 });

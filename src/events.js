@@ -73,7 +73,7 @@ const ACTOR_SET = new Set(ACTORS);
  */
 const DATA_KEY_ORDER = Object.freeze({
   "session.start": ["harness_version", "session", "config_sha"],
-  "session.end": ["turns", "total_input_tokens", "total_output_tokens", "total_cost_micro_usd"],
+  "session.end": ["turns", "total_input_tokens", "total_output_tokens", "total_cost_micro_usd", "priced"],
   "session.error": ["message", "code"],
   "session.warn": ["kind", "used", "cap", "fraction"],
   "session.branch": ["from_seq", "new_base_seq"],

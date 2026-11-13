@@ -136,7 +136,7 @@ async function main() {
 
   async function persistProfiles() {
     try {
-      await registry.saveProfiles(providersFile, discoveredRows.filter((r) => r.source === "tui"));
+      await registry.saveProfiles(providersFile, discoveredRows.filter((r) => r.source === "tui"), { warn: (m) => process.stderr.write(`${m}\n`) });
     } catch (err) {
       appendRows([`${style.red}providers.config.json write failed: ${err.message}${style.reset}`]);
     }
@@ -298,6 +298,9 @@ async function main() {
         ...(profile.apiKeyEnv ? { apiKeyEnv: profile.apiKeyEnv } : {}),
         ...(profile.contextLimit !== undefined
           ? { contextLimit: profile.contextLimit } // v0.5.0 H5
+          : {}),
+        ...(profile.pricing !== undefined
+          ? { pricing: profile.pricing } // v0.9.0 S1 (validated again by rowOf)
           : {}),
       });
       if (row === null) {

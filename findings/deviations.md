@@ -1438,3 +1438,61 @@ Applied MUST-FIX (F1, F9, F19), the SHOULD-FIX list, and the D items from
   a fresh log (events: 2, sha printed, torn_tail: no); stats with the
   explicit "cost: n/a (no pricing table configured — token counts only)"
   line; doctor → 6×ok + "doctor: usable". Log residue 0. No push.
+
+## v0.9.0 "Closed Loops" (2026-11-13)
+
+167. **S1 — pricing survives the whitelist.** rowOf() keeps
+    pricing:{input_per_mtok, output_per_mtok} when BOTH fields are finite
+    and >= 0 (rounded to ints — loop's cost discipline); malformed pricing
+    (one-sided, negative, non-numeric) is DROPPED — never half-kept — with
+    a warning through the registry's existing warn channel (loadProfiles
+    collects the drops and reports; saveProfiles gained an optional warn
+    arg; the TUI passes stderr writers on both paths). Env discovery reads
+    HARNESS_PROVIDER_<ID>_INPUT/_OUTPUT_PER_MTOK (both-or-none). The TUI
+    form gains fields 6+7 (blank = no pricing) and REFUSES a one-sided pair
+    at emit — the refusal lands at the form rather than the registry's drop.
+168. **S2 — session.end reports real money when priced.** end() computes
+    total_cost_micro_usd from state.provider.pricing with the same
+    (tokens/1e6)x-rate integer arithmetic as stats' computeCostFromProfile;
+    priced is an ADDITIVE FIELD on the existing session.end event. Unpriced
+    sessions: cost 0 + priced:false — UNMEASURED is now distinguishable from
+    FREE. Canonical order: total_cost_micro_usd then priced; the fixture
+    line gained priced:false. The stats-agreement test pins equality on the
+    SAME log, and the two guards (finite AND >= 0) are aligned.
+169. **S3 — bash auto-snapshot (undo covers all three mutating tools).**
+    Snapshot BEFORE the shell spawns, label bash:<first 40 chars>;
+    content-addressed. --no-snapshot opts out and reports; the byte guard
+    compares the STORE's CURRENT SIZE (default 32 MiB, env
+    AC_BASH_SNAPSHOT_MAX_BYTES) and skips with a reported reason — the run
+    itself always proceeds (best-effort identical to write.js). PROBE
+    LESSONS: the guard measures store.size() and the store is
+    PROJECT-SCOPED by cwd — a test seeding through a DIFFERENT cwd
+    correctly saw 0 bytes (the guard leg seeds the SAME cwd now); an EMPTY
+    store is under any budget (snapshot correctly proceeds) so the guard
+    test seeds first.
+170. **README.** The pricing convention (per-Mtok, micro-units of the
+    OPERATOR's OWN currency — USD never claimed; no table ships;
+    drop-on-malformed; the priced flag semantics) and the bash snapshot
+    behavior with its opt-out and guard.
+171. **Panel-form walking tests migrated to 7 fields** (the additive S1
+    change): tui.providerpanel (add, empty-key, id-locked, no-change,
+    active-edit) + budget-compaction H5 (add, edit) + v090's own one-sided
+    refusal. Assertions unchanged in spirit — same profiles emitted, plus
+    !('pricing' in profile) checks on the blank walks.
+
+**v0.9.0 gate evidence (2026-11-13, node v24.18.0):**
+- node scripts/check.mjs -> all files OK.
+- bare node --test -> 346 tests, 345 pass, 0 fail, 1 platform skip
+  (339 baseline + 7 v090-closed-loops; the migrated walks kept their test
+  names and assertions).
+- sh bench/ship-gate.sh -> PASS (DC6, name-guard, zero-dep).
+- Determinism: run sha == replay sha =
+  2784af0d990374665d41dc020c7e8db69cac49cc6bd44da89ecbdd8b016d1d57.
+- MANUAL PROOFS (real output captured): (1) PRICED session.end:
+  {"turns":1,"total_input_tokens":7,"total_output_tokens":13,
+  "total_cost_micro_usd":99,"priced":true}; (2) bash restore: snapshot
+  seq 1 taken, file read AFTER-BASH, restore -> BEFORE-BASH; (3)
+  malformed drop: "saveProfiles: malformed pricing on bad-half dropped
+  (both fields must be finite numbers >= 0)" with the GOOD profile's
+  pricing round-tripped and bad-half's absent. Log residue 0; tmp probe
+  residue cleaned. No push.

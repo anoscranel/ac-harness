@@ -996,11 +996,28 @@ export function createLoop({
   async function end() {
     if (state.ended || !state.started) return;
     state.ended = true;
+    // v0.9.0 S2: total_cost_micro_usd from the ACTIVE provider's pricing
+    // when the profile carries one (micro-USD integers, never floats).
+    // Absent pricing keeps the 0 but adds priced:false so a reader can
+    // tell UNMEASURED from FREE.
+    const pricing = state.provider?.pricing;
+    let totalCostMicroUsd = 0;
+    let priced = false;
+    if (pricing &&
+        Number.isFinite(pricing.input_per_mtok) && pricing.input_per_mtok >= 0 &&
+        Number.isFinite(pricing.output_per_mtok) && pricing.output_per_mtok >= 0) {
+      // v0.9.0 fix: scale to micro-units (see stats.js) — tokens * rate-per-Mtok.
+      const inputPart = Math.round(state.totalInput * pricing.input_per_mtok);
+      const outputPart = Math.round(state.totalOutput * pricing.output_per_mtok);
+      totalCostMicroUsd = inputPart + outputPart;
+      priced = true;
+    }
     await log.appendEvent("session.end", "harness", {
       turns: state.turns,
       total_input_tokens: state.totalInput,
       total_output_tokens: state.totalOutput,
-      total_cost_micro_usd: 0, // v1: no priced providers; integers only, never floats
+      total_cost_micro_usd: totalCostMicroUsd, // integers only, never floats
+      priced, // v0.9.0 S2: false = unmeasured (no profile pricing), NOT free
     });
   }
 

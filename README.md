@@ -212,6 +212,32 @@ Four commands over capabilities that already existed — no new mechanisms:
   each ok/warn/fail with a remediation line; exits non-zero only on fail.
   `ac-harness doctor`
 
+## Pricing convention + bash undo (v0.9.0)
+
+**Pricing unit convention.** A provider profile may carry
+`pricing: {input_per_mtok, output_per_mtok}` — a per-**million-tokens**
+rate in **micro-units of the operator's own currency** (integers only, never
+floats). Which currency is the operator's choice; the harness never assumes
+USD and ships **no pricing table** — the number is only as good as the
+profile's own rates. A well-formed block round-trips through
+`providers.config.json` and the env vars
+(`HARNESS_PROVIDER_<ID>_INPUT_PER_MTOK`/`_OUTPUT_PER_MTOK`); a malformed
+block (one-sided, negative, non-numeric) is **dropped with a warning**, never
+stored half-formed. A priced session's `session.end` reports
+`total_cost_micro_usd` (real money) and `priced: true`; an unpriced one keeps
+`0` with `priced: false` — unmeasured, not free. `stats` agrees with
+`session.end` on the same log by construction.
+
+**bash snapshots before it runs** — the only mutating tool without undo now
+has it, like write/edit. The pre-run snapshot is content-addressed (an
+unchanged tree costs a manifest, not copies), labelled with the first 40
+chars of the command, and reported in the tool result as `checkpoint`.
+Opt-out: `--no-snapshot` (as `no_snapshot: true` in the tool args) for a
+deliberate run you do not want rollback for. Cost guard: if the checkpoint
+store for this project exceeds 32 MiB (override with
+`AC_BASH_SNAPSHOT_MAX_BYTES`), the snapshot is **skipped with a reported
+reason** rather than stalling — the run still proceeds.
+
 ## Zero-dependency statement
 
 **Preflight, honestly:** the actual minimum is **Node >= 24** (the code uses
